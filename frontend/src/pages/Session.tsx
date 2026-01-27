@@ -1,0 +1,177 @@
+import { useEffect, useState, useCallback } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import { useAuth } from '../hooks/useAuth';
+import { useSession } from '../hooks/useSession';
+import { useAgentConnection } from '../hooks/useAgentConnection';
+import { SessionRoom, SessionLoading } from '../components/Session';
+import { Button } from '../components/ui';
+import { supabase } from '../lib/supabase';
+
+interface Scenario {
+  id: string;
+  title: string;
+  description: string;
+  context: string;
+  persona_name: string;
+  persona_style: string;
+}
+
+export function Session() {
+  const { scenarioId } = useParams<{ scenarioId: string }>();
+  const navigate = useNavigate();
+  const { accessCode } = useAuth();
+  const {
+    startSession,
+    endSession,
+    token,
+    sessionId,
+    livekitUrl,
+    isConnecting,
+    error,
+  } = useSession();
+
+  const [initError, setInitError] = useState<string | null>(null);
+  const [scenario, setScenario] = useState<Scenario | null>(null);
+
+  // Use agent connection hook to connect during loading
+  const {
+    state: agentState,
+    room: connectedRoom,
+    error: agentError,
+    retry: retryConnection,
+    disconnect,
+  } = useAgentConnection({
+    token,
+    serverUrl: livekitUrl,
+    agentTimeout: 30000, // 30 seconds
+  });
+
+  // Fetch scenario data
+  useEffect(() => {
+    if (!scenarioId) return;
+
+    const fetchScenario = async () => {
+      try {
+        const { data, error: fetchError } = await supabase
+          .from('scenarios')
+          .select('*')
+          .eq('id', scenarioId)
+          .single();
+
+        if (fetchError) throw fetchError;
+        setScenario(data);
+      } catch (err) {
+        console.error('Error fetching scenario:', err);
+      }
+    };
+
+    fetchScenario();
+  }, [scenarioId]);
+
+  // Start session (get token)
+  useEffect(() => {
+    if (!scenarioId || !accessCode || token) return;
+
+    const initSession = async () => {
+      try {
+        await startSession(scenarioId, accessCode.code);
+      } catch (err) {
+        setInitError(
+          err instanceof Error ? err.message : 'Falha ao iniciar sessao'
+        );
+      }
+    };
+
+    initSession();
+  }, [scenarioId, accessCode, startSession, token]);
+
+  const handleSessionEnd = useCallback(
+    async (durationSeconds: number) => {
+      if (sessionId) {
+        disconnect(); // Clean up the room connection
+        await endSession(sessionId, durationSeconds);
+        navigate(`/feedback/${sessionId}`);
+      }
+    },
+    [sessionId, endSession, navigate, disconnect]
+  );
+
+  const handleRetry = useCallback(() => {
+    setInitError(null);
+    retryConnection();
+  }, [retryConnection]);
+
+  const handleCancel = useCallback(() => {
+    disconnect();
+    navigate('/home');
+  }, [disconnect, navigate]);
+
+  // Token fetch error (not agent connection error - that's shown on loading screen)
+  if (error || initError) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-black text-white p-4">
+        <div className="max-w-md text-center">
+          <h2 className="text-2xl font-bold mb-2">Erro ao iniciar sessao</h2>
+          <p className="text-gray-400 mb-8">{error || initError}</p>
+          <Button onClick={() => navigate('/home')} variant="primary" size="lg">
+            Voltar para Home
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  // Check if LiveKit URL is configured
+  if (!livekitUrl) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-black text-white p-4">
+        <div className="max-w-md text-center">
+          <h2 className="text-2xl font-bold mb-2">Configuracao pendente</h2>
+          <p className="text-gray-400 mb-8">
+            O servidor LiveKit nao esta configurado. Configure a variavel
+            VITE_LIVEKIT_URL no arquivo .env
+          </p>
+          <Button onClick={() => navigate('/home')} variant="primary" size="lg">
+            Voltar para Home
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  // Loading state - show until agent is ready
+  // This includes: getting token, connecting to LiveKit, waiting for agent
+  if (isConnecting || !token || agentState !== 'ready') {
+    return (
+      <SessionLoading
+        scenarioTitle={scenario?.title}
+        scenarioContext={scenario?.context}
+        connectionState={agentState}
+        hasToken={!!token}
+        error={agentError}
+        onRetry={handleRetry}
+        onCancel={handleCancel}
+      />
+    );
+  }
+
+  // Agent connected - render session room
+  // Note: We disconnect the verification room and let SessionRoom create a fresh connection
+  // This avoids issues with LiveKitRoom trying to reconfigure an existing room
+  // The agent is already verified as present, so the new connection will work
+  if (connectedRoom) {
+    console.log('[Session] Disconnecting verification room before SessionRoom');
+    connectedRoom.disconnect();
+  }
+
+  return (
+    <SessionRoom
+      token={token}
+      serverUrl={livekitUrl}
+      onSessionEnd={handleSessionEnd}
+      scenarioTitle={scenario?.title}
+      scenarioContext={scenario?.context}
+      existingRoom={null} // Let SessionRoom create fresh connection
+    />
+  );
+}
