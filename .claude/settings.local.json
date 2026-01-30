@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(taskkill:*)",
+      "Bash(if exist auth_state rmdir /s /q auth_state)",
+      "Bash(Remove-Item -Recurse -Force \"c:\\\\Users\\\\User\\\\OneDrive\\\\Desktop\\\\Projetos Web\\\\shadow_mvp\\\\shadow\\\\gateway\\\\auth_state\" -ErrorAction SilentlyContinue)",
+      "Bash(Write-Host \"Pasta auth_state deletada \\(se existia\\)\")",
+      "Bash(pm2 start:*)",
+      "Bash(pm2 status:*)",
+      "Bash(pm2 logs:*)",
+      "Bash(cmd //c \"taskkill /PID 113028 /F\")",
+      "Bash(pm2 restart:*)",
+      "Bash(cmd /c \"taskkill /PID 106532 /F\")",
+      "Bash(sqlite3:*)",
+      "Bash(dir:*)",
+      "Bash(wc:*)"
+    ]
+  }
+}
