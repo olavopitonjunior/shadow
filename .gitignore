@@ -47,13 +47,21 @@ coverage/
 .coverage
 .pytest_cache/
 tests/*.png
+apps/admin/playwright-report/
+apps/admin/test-results/
 
 # Agent logs
 agent/*.err
 agent/*.out
 
 # Temporary directories
-shadow/
+# shadow/ - now tracked
+
+# Shadow agent/gateway specifics
+shadow/agent/.venv/
+shadow/gateway/node_modules/
+shadow/gateway/auth_info*/
+shadow/logs/
 
 # MCP config (may contain tokens)
 .mcp.json
