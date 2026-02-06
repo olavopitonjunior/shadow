@@ -1,0 +1,180 @@
+version: '3.8'
+
+# Multi-tenant Shadow deployment
+# Supports up to 4 users with isolated instances
+# Usage: docker-compose -f docker-compose.multi.yml up -d
+
+services:
+  # ==================== USER 1 ====================
+  gateway-user1:
+    build: ./gateway
+    container_name: shadow-gateway-user1
+    environment:
+      - SHADOW_OWNER_E164=${SHADOW_USER1_PHONE}
+      - SHADOW_AGENT_URL=http://agent-user1:8090/process
+      - SHADOW_AGENT_TOKEN=${SHADOW_USER1_TOKEN:-user1-secret}
+      - SHADOW_GATEWAY_PORT=18790
+      - SHADOW_ACCESS_MODE=${SHADOW_ACCESS_MODE:-open}
+      - SHADOW_REPLY_OWNER_ONLY=true
+      - SHADOW_LOG_LEVEL=${SHADOW_LOG_LEVEL:-info}
+    ports:
+      - "18790:18790"
+    volumes:
+      - ./data/user1/auth:/app/auth_info
+    depends_on:
+      - agent-user1
+    restart: unless-stopped
+    networks:
+      - shadow-network
+
+  agent-user1:
+    build: ./agent
+    container_name: shadow-agent-user1
+    environment:
+      - SHADOW_OWNER_E164=${SHADOW_USER1_PHONE}
+      - SHADOW_GATEWAY_SEND_URL=http://gateway-user1:18790/send
+      - SHADOW_AGENT_TOKEN=${SHADOW_USER1_TOKEN:-user1-secret}
+      - SHADOW_DB_PATH=/data/shadow.db
+      - SHADOW_ACCESS_MODE=${SHADOW_ACCESS_MODE:-open}
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      - SHADOW_USE_SUPABASE=${SHADOW_USE_SUPABASE:-true}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    volumes:
+      - ./data/user1/db:/data
+    restart: unless-stopped
+    networks:
+      - shadow-network
+
+  # ==================== USER 2 ====================
+  gateway-user2:
+    build: ./gateway
+    container_name: shadow-gateway-user2
+    profiles: ["user2", "all"]
+    environment:
+      - SHADOW_OWNER_E164=${SHADOW_USER2_PHONE}
+      - SHADOW_AGENT_URL=http://agent-user2:8090/process
+      - SHADOW_AGENT_TOKEN=${SHADOW_USER2_TOKEN:-user2-secret}
+      - SHADOW_GATEWAY_PORT=18791
+      - SHADOW_ACCESS_MODE=${SHADOW_ACCESS_MODE:-open}
+      - SHADOW_REPLY_OWNER_ONLY=true
+      - SHADOW_LOG_LEVEL=${SHADOW_LOG_LEVEL:-info}
+    ports:
+      - "18791:18791"
+    volumes:
+      - ./data/user2/auth:/app/auth_info
+    depends_on:
+      - agent-user2
+    restart: unless-stopped
+    networks:
+      - shadow-network
+
+  agent-user2:
+    build: ./agent
+    container_name: shadow-agent-user2
+    profiles: ["user2", "all"]
+    environment:
+      - SHADOW_OWNER_E164=${SHADOW_USER2_PHONE}
+      - SHADOW_GATEWAY_SEND_URL=http://gateway-user2:18791/send
+      - SHADOW_AGENT_TOKEN=${SHADOW_USER2_TOKEN:-user2-secret}
+      - SHADOW_DB_PATH=/data/shadow.db
+      - SHADOW_ACCESS_MODE=${SHADOW_ACCESS_MODE:-open}
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      - SHADOW_USE_SUPABASE=${SHADOW_USE_SUPABASE:-true}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    volumes:
+      - ./data/user2/db:/data
+    restart: unless-stopped
+    networks:
+      - shadow-network
+
+  # ==================== USER 3 ====================
+  gateway-user3:
+    build: ./gateway
+    container_name: shadow-gateway-user3
+    profiles: ["user3", "all"]
+    environment:
+      - SHADOW_OWNER_E164=${SHADOW_USER3_PHONE}
+      - SHADOW_AGENT_URL=http://agent-user3:8090/process
+      - SHADOW_AGENT_TOKEN=${SHADOW_USER3_TOKEN:-user3-secret}
+      - SHADOW_GATEWAY_PORT=18792
+      - SHADOW_ACCESS_MODE=${SHADOW_ACCESS_MODE:-open}
+      - SHADOW_REPLY_OWNER_ONLY=true
+      - SHADOW_LOG_LEVEL=${SHADOW_LOG_LEVEL:-info}
+    ports:
+      - "18792:18792"
+    volumes:
+      - ./data/user3/auth:/app/auth_info
+    depends_on:
+      - agent-user3
+    restart: unless-stopped
+    networks:
+      - shadow-network
+
+  agent-user3:
+    build: ./agent
+    container_name: shadow-agent-user3
+    profiles: ["user3", "all"]
+    environment:
+      - SHADOW_OWNER_E164=${SHADOW_USER3_PHONE}
+      - SHADOW_GATEWAY_SEND_URL=http://gateway-user3:18792/send
+      - SHADOW_AGENT_TOKEN=${SHADOW_USER3_TOKEN:-user3-secret}
+      - SHADOW_DB_PATH=/data/shadow.db
+      - SHADOW_ACCESS_MODE=${SHADOW_ACCESS_MODE:-open}
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      - SHADOW_USE_SUPABASE=${SHADOW_USE_SUPABASE:-true}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    volumes:
+      - ./data/user3/db:/data
+    restart: unless-stopped
+    networks:
+      - shadow-network
+
+  # ==================== USER 4 ====================
+  gateway-user4:
+    build: ./gateway
+    container_name: shadow-gateway-user4
+    profiles: ["user4", "all"]
+    environment:
+      - SHADOW_OWNER_E164=${SHADOW_USER4_PHONE}
+      - SHADOW_AGENT_URL=http://agent-user4:8090/process
+      - SHADOW_AGENT_TOKEN=${SHADOW_USER4_TOKEN:-user4-secret}
+      - SHADOW_GATEWAY_PORT=18793
+      - SHADOW_ACCESS_MODE=${SHADOW_ACCESS_MODE:-open}
+      - SHADOW_REPLY_OWNER_ONLY=true
+      - SHADOW_LOG_LEVEL=${SHADOW_LOG_LEVEL:-info}
+    ports:
+      - "18793:18793"
+    volumes:
+      - ./data/user4/auth:/app/auth_info
+    depends_on:
+      - agent-user4
+    restart: unless-stopped
+    networks:
+      - shadow-network
+
+  agent-user4:
+    build: ./agent
+    container_name: shadow-agent-user4
+    profiles: ["user4", "all"]
+    environment:
+      - SHADOW_OWNER_E164=${SHADOW_USER4_PHONE}
+      - SHADOW_GATEWAY_SEND_URL=http://gateway-user4:18793/send
+      - SHADOW_AGENT_TOKEN=${SHADOW_USER4_TOKEN:-user4-secret}
+      - SHADOW_DB_PATH=/data/shadow.db
+      - SHADOW_ACCESS_MODE=${SHADOW_ACCESS_MODE:-open}
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      - SHADOW_USE_SUPABASE=${SHADOW_USE_SUPABASE:-true}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    volumes:
+      - ./data/user4/db:/data
+    restart: unless-stopped
+    networks:
+      - shadow-network
+
+networks:
+  shadow-network:
+    driver: bridge

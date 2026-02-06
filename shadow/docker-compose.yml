@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  gateway:
+    build: ./gateway
+    container_name: shadow-gateway
+    environment:
+      - SHADOW_OWNER_E164=${SHADOW_OWNER_E164}
+      - SHADOW_AGENT_URL=http://agent:8090/process
+      - SHADOW_AGENT_TOKEN=${SHADOW_AGENT_TOKEN:-shadow-secret}
+      - SHADOW_GATEWAY_PORT=18790
+      - SHADOW_ACCESS_MODE=${SHADOW_ACCESS_MODE:-owner}
+      - SHADOW_REPLY_OWNER_ONLY=${SHADOW_REPLY_OWNER_ONLY:-true}
+      - SHADOW_LOG_LEVEL=${SHADOW_LOG_LEVEL:-info}
+    ports:
+      - "18790:18790"
+    volumes:
+      - ./data/auth:/app/auth_info
+    depends_on:
+      - agent
+    restart: unless-stopped
+    networks:
+      - shadow-network
+
+  agent:
+    build: ./agent
+    container_name: shadow-agent
+    environment:
+      - SHADOW_OWNER_E164=${SHADOW_OWNER_E164}
+      - SHADOW_GATEWAY_SEND_URL=http://gateway:18790/send
+      - SHADOW_AGENT_TOKEN=${SHADOW_AGENT_TOKEN:-shadow-secret}
+      - SHADOW_DB_PATH=/data/shadow.db
+      - SHADOW_ACCESS_MODE=${SHADOW_ACCESS_MODE:-owner}
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      - SHADOW_USE_SUPABASE=${SHADOW_USE_SUPABASE:-false}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    ports:
+      - "8090:8090"
+    volumes:
+      - ./data/db:/data
+    restart: unless-stopped
+    networks:
+      - shadow-network
+
+networks:
+  shadow-network:
+    driver: bridge
+
+volumes:
+  auth-data:
+  db-data:

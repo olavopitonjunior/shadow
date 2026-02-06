@@ -59,6 +59,7 @@ agent/*.out
 
 # Shadow agent/gateway specifics
 shadow/agent/.venv/
+shadow/agent/data/
 shadow/gateway/node_modules/
 shadow/gateway/auth_info*/
 shadow/logs/

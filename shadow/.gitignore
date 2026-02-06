@@ -1,0 +1,11 @@
+# Logs do PM2
+logs/*.log
+
+# Node
+node_modules/
+
+# Ambiente
+.env
+
+# Auth WhatsApp
+gateway/auth_info/

@@ -1,0 +1,10 @@
+{
+  "name": "shadow-plugin-message-logger",
+  "version": "1.0.0",
+  "description": "Logs all messages received and sent through the gateway",
+  "main": "index.js",
+  "type": "module",
+  "shadow": {
+    "id": "message-logger"
+  }
+}

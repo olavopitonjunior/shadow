@@ -1,0 +1,83 @@
+{
+  "version": 1,
+  "jobs": [
+    {
+      "id": "2f6f9abe-983f-4504-8e14-3ed5ee5b8f8d",
+      "name": "Verificar lembretes pendentes",
+      "schedule": {
+        "kind": "every",
+        "at_ms": null,
+        "every_ms": 60000,
+        "anchor_ms": null,
+        "expr": null,
+        "tz": "America/Sao_Paulo"
+      },
+      "action": "check_reminders",
+      "params": {},
+      "enabled": true,
+      "delete_after_run": false,
+      "created_at_ms": 1770325432501,
+      "updated_at_ms": 1770403032782,
+      "state": {
+        "next_run_at_ms": 1770403092782,
+        "running_at_ms": null,
+        "last_run_at_ms": 1770403032780,
+        "last_status": "ok",
+        "last_error": null,
+        "last_duration_ms": 2
+      }
+    },
+    {
+      "id": "2d75c39c-5912-448b-9c9e-5f4cdcaa9313",
+      "name": "Resumo diário",
+      "schedule": {
+        "kind": "cron",
+        "at_ms": null,
+        "every_ms": null,
+        "anchor_ms": null,
+        "expr": "0 9 * * *",
+        "tz": "America/Sao_Paulo"
+      },
+      "action": "daily_summary",
+      "params": {},
+      "enabled": true,
+      "delete_after_run": false,
+      "created_at_ms": 1770325432502,
+      "updated_at_ms": 1770379216394,
+      "state": {
+        "next_run_at_ms": 1770465600000,
+        "running_at_ms": null,
+        "last_run_at_ms": 1770379216124,
+        "last_status": "ok",
+        "last_error": null,
+        "last_duration_ms": 267
+      }
+    },
+    {
+      "id": "9ab30788-9f88-4cb0-82ed-dc4961be76f1",
+      "name": "Verificar alertas programados",
+      "schedule": {
+        "kind": "every",
+        "at_ms": null,
+        "every_ms": 60000,
+        "anchor_ms": null,
+        "expr": null,
+        "tz": "America/Sao_Paulo"
+      },
+      "action": "check_scheduled_alerts",
+      "params": {},
+      "enabled": true,
+      "delete_after_run": false,
+      "created_at_ms": 1770325432516,
+      "updated_at_ms": 1770403032786,
+      "state": {
+        "next_run_at_ms": 1770403092786,
+        "running_at_ms": null,
+        "last_run_at_ms": 1770403032784,
+        "last_status": "ok",
+        "last_error": null,
+        "last_duration_ms": 2
+      }
+    }
+  ]
+}
