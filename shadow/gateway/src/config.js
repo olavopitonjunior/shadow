@@ -41,6 +41,14 @@ const config = {
   accessMode: process.env.SHADOW_ACCESS_MODE || "owner_only",
   // Shadow Group JID para redirecionar self-chat (evita problema do relógio)
   shadowGroupJid: process.env.SHADOW_GROUP_JID || null,
+  // Grupos monitorados para sugestões proativas (JIDs de grupos)
+  // Formato: "120363425697918997@g.us,120363425697918998@g.us"
+  monitoredGroups: parseList(process.env.SHADOW_MONITORED_GROUPS),
+  // Contatos monitorados para sugestões proativas (telefones E.164)
+  // Formato: "+5511999999999,+5511888888888"
+  monitoredContacts: parseList(process.env.SHADOW_MONITORED_CONTACTS).map(normalizeE164).filter(Boolean),
+  // Se true, monitora TODAS as conversas (grupos + DMs) - ignora monitoredGroups/monitoredContacts
+  monitorAllGroups: process.env.SHADOW_MONITOR_ALL_GROUPS === "true",
   // LID cache settings
   lidCacheTtlMs: Number.parseInt(process.env.SHADOW_LID_CACHE_TTL_MS || "86400000", 10), // 24 hours
   lidCacheMaxSize: Number.parseInt(process.env.SHADOW_LID_CACHE_MAX_SIZE || "10000", 10),

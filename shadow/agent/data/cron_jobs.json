@@ -17,11 +17,11 @@
       "enabled": true,
       "delete_after_run": false,
       "created_at_ms": 1770325432501,
-      "updated_at_ms": 1770403032782,
+      "updated_at_ms": 1770429117495,
       "state": {
-        "next_run_at_ms": 1770403092782,
+        "next_run_at_ms": 1770429177495,
         "running_at_ms": null,
-        "last_run_at_ms": 1770403032780,
+        "last_run_at_ms": 1770429117493,
         "last_status": "ok",
         "last_error": null,
         "last_duration_ms": 2
@@ -69,14 +69,40 @@
       "enabled": true,
       "delete_after_run": false,
       "created_at_ms": 1770325432516,
-      "updated_at_ms": 1770403032786,
+      "updated_at_ms": 1770429117499,
       "state": {
-        "next_run_at_ms": 1770403092786,
+        "next_run_at_ms": 1770429177499,
         "running_at_ms": null,
-        "last_run_at_ms": 1770403032784,
+        "last_run_at_ms": 1770429117497,
         "last_status": "ok",
         "last_error": null,
         "last_duration_ms": 2
+      }
+    },
+    {
+      "id": "71f97d71-0bfb-49a7-bdbc-1bcf101a3f6d",
+      "name": "Processar sugestões proativas",
+      "schedule": {
+        "kind": "every",
+        "at_ms": null,
+        "every_ms": 300000,
+        "anchor_ms": null,
+        "expr": null,
+        "tz": "America/Sao_Paulo"
+      },
+      "action": "process_suggestions",
+      "params": {},
+      "enabled": true,
+      "delete_after_run": false,
+      "created_at_ms": 1770409235983,
+      "updated_at_ms": 1770429057469,
+      "state": {
+        "next_run_at_ms": 1770429357469,
+        "running_at_ms": null,
+        "last_run_at_ms": 1770429055203,
+        "last_status": "ok",
+        "last_error": null,
+        "last_duration_ms": 2266
       }
     }
   ]

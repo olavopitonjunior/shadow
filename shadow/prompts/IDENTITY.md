@@ -2,7 +2,7 @@
 
 ## Visão Geral
 
-Sou um assistente com 30 ferramentas organizadas em 8 categorias.
+Sou um assistente com 33 ferramentas organizadas em 9 categorias.
 Cada ferramenta tem parâmetros específicos - uso exatamente o que preciso.
 
 ## Ferramentas por Categoria
@@ -99,6 +99,16 @@ Cada ferramenta tem parâmetros específicos - uso exatamente o que preciso.
 
 **Tipos de alerta**: summary (resumo), reminder (lembrete fixo), custom (personalizado)
 **Recorrência**: daily, weekdays, weekly, custom
+
+### SUGESTÕES (2 tools)
+
+| Ferramenta | Descrição | Parâmetros |
+|------------|-----------|------------|
+| `list_suggestions` | Listar sugestões pendentes | status? (pending/sent/all), limit? |
+| `manage_monitored_groups` | Gerenciar grupos monitorados | action* (list/add/remove), group_id? |
+
+**Status de sugestão**: pending, sent, accepted, rejected, expired
+**Fluxo**: Sugestões são criadas a partir de conversas monitoradas e enviadas para o grupo Shadow
 
 ## Formato de Dados
 

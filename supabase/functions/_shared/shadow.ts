@@ -1,6 +1,104 @@
 export type ContentType = "text" | "audio" | "image" | "document";
 export type Direction = "inbound" | "outbound";
 
+// === Security: Phone Validation (inspired by moltbot) ===
+
+/**
+ * Valida e normaliza um número de telefone para formato E.164.
+ * Protege contra path traversal e injection attacks.
+ *
+ * @param phone - Número de telefone a validar
+ * @returns Número normalizado ou null se inválido
+ *
+ * @example
+ * validatePhoneNumber("+5511999999999") // "+5511999999999"
+ * validatePhoneNumber("5511999999999")  // "+5511999999999"
+ * validatePhoneNumber("../../../etc")   // null (path traversal attempt)
+ * validatePhoneNumber("abc123")         // null (invalid format)
+ */
+export function validatePhoneNumber(phone: string | null | undefined): string | null {
+  if (!phone || typeof phone !== "string") {
+    return null;
+  }
+
+  // Remove espaços e caracteres de formatação comuns
+  let cleaned = phone.trim();
+
+  // Detecta tentativas de path traversal ou injection
+  if (
+    cleaned.includes("..") ||
+    cleaned.includes("/") ||
+    cleaned.includes("\\") ||
+    cleaned.includes("\0") ||
+    cleaned.includes("<") ||
+    cleaned.includes(">")
+  ) {
+    console.warn("[security] Path traversal attempt detected in phone:", phone.slice(0, 50));
+    return null;
+  }
+
+  // Remove caracteres não numéricos exceto + no início
+  const hasPlus = cleaned.startsWith("+");
+  cleaned = cleaned.replace(/[^\d]/g, "");
+
+  // Verifica se tem tamanho válido (E.164: 10-15 dígitos)
+  if (cleaned.length < 10 || cleaned.length > 15) {
+    return null;
+  }
+
+  // Verifica se são apenas dígitos
+  if (!/^\d+$/.test(cleaned)) {
+    return null;
+  }
+
+  // Retorna no formato E.164
+  return hasPlus || cleaned.length >= 11 ? `+${cleaned}` : cleaned;
+}
+
+/**
+ * Verifica se um phone number é válido (não normaliza).
+ */
+export function isValidPhoneNumber(phone: string | null | undefined): boolean {
+  return validatePhoneNumber(phone) !== null;
+}
+
+/**
+ * Sanitiza metadata de mensagem para prevenir injection em prompts/logs.
+ * Remove ou escapa caracteres potencialmente perigosos.
+ *
+ * @param metadata - Objeto de metadata a sanitizar
+ * @returns Objeto sanitizado (cópia)
+ */
+export function sanitizeMessageMetadata<T extends Record<string, unknown>>(
+  metadata: T
+): T {
+  const sanitized = {} as T;
+
+  for (const [key, value] of Object.entries(metadata)) {
+    if (typeof value === "string") {
+      // Remove caracteres de controle e null bytes
+      let clean = value.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "");
+
+      // Trunca strings muito longas (previne DoS)
+      if (clean.length > 10000) {
+        clean = clean.slice(0, 10000) + "...[truncated]";
+      }
+
+      (sanitized as Record<string, unknown>)[key] = clean;
+    } else if (value && typeof value === "object" && !Array.isArray(value)) {
+      // Recursivamente sanitiza objetos aninhados
+      (sanitized as Record<string, unknown>)[key] = sanitizeMessageMetadata(
+        value as Record<string, unknown>
+      );
+    } else {
+      // Mantém outros tipos como estão
+      (sanitized as Record<string, unknown>)[key] = value;
+    }
+  }
+
+  return sanitized;
+}
+
 export interface NormalizedMessage {
   user_phone: string;
   contact_phone: string | null;
@@ -36,18 +134,26 @@ export function parseBoolean(value: unknown): boolean {
 export function normalizeIncomingMessage(payload: any): NormalizedMessage {
   const nowIso = new Date().toISOString();
 
+  // Sanitiza o payload para prevenir injection
+  const safePayload = sanitizeMessageMetadata(payload ?? {});
+
   // Generic payload
-  if (payload?.user_phone && (payload?.content || payload?.text)) {
+  if (safePayload?.user_phone && (safePayload?.content || safePayload?.text)) {
+    const userPhone = validatePhoneNumber(String(safePayload.user_phone)) ?? "unknown";
+    const contactPhone = safePayload.contact_phone
+      ? validatePhoneNumber(String(safePayload.contact_phone))
+      : null;
+
     return {
-      user_phone: String(payload.user_phone),
-      contact_phone: payload.contact_phone ? String(payload.contact_phone) : null,
-      direction: payload.direction === "outbound" ? "outbound" : "inbound",
-      content: String(payload.content ?? payload.text ?? ""),
-      content_type: payload.content_type ?? "text",
-      timestamp: payload.timestamp ?? nowIso,
-      source: payload.source ?? "generic",
-      is_group: Boolean(payload.is_group),
-      raw: payload,
+      user_phone: userPhone,
+      contact_phone: contactPhone,
+      direction: safePayload.direction === "outbound" ? "outbound" : "inbound",
+      content: String(safePayload.content ?? safePayload.text ?? ""),
+      content_type: safePayload.content_type ?? "text",
+      timestamp: safePayload.timestamp ?? nowIso,
+      source: safePayload.source ?? "generic",
+      is_group: Boolean(safePayload.is_group),
+      raw: safePayload,
     };
   }
 

@@ -103,8 +103,9 @@ def _get_entity_extractor():
         _entity_extractor = EntityExtractor(_config.gemini_api_key)
     return _entity_extractor
 
-# URL do gateway para criar grupo Shadow
+# URL do gateway para criar grupo Shadow e enviar mensagens
 GATEWAY_URL = os.getenv("SHADOW_GATEWAY_URL", "http://localhost:18790")
+GATEWAY_SEND_URL = os.getenv("SHADOW_GATEWAY_SEND_URL", f"{GATEWAY_URL}/send")
 
 # Comandos de onboarding
 ONBOARDING_COMMANDS = {"setup", "iniciar", "começar", "start", "configurar"}
@@ -120,6 +121,382 @@ def _create_shadow_group() -> dict[str, Any]:
         return {"error": f"HTTP {response.status_code}: {response.text}"}
     except Exception as e:
         return {"error": str(e)}
+
+
+def _send_to_shadow_group(storage: Storage, message: str) -> bool:
+    """
+    Envia mensagem para o Grupo Shadow via gateway (Phase 8 - CRM Oculto).
+
+    Todas as comunicações do Shadow com o owner devem ir para o grupo dedicado.
+    Se o grupo não existir, tenta criar um novo.
+    """
+    try:
+        # Get Shadow group JID from storage
+        group_jid = storage.get_shadow_group_jid()
+
+        if not group_jid:
+            # Try to create the group
+            print("[send_to_shadow] No Shadow group found, attempting to create...")
+            result = _create_shadow_group()
+            if "error" in result:
+                print(f"[send_to_shadow] Failed to create group: {result['error']}")
+                return False
+
+            group_jid = result.get("groupJid")  # Gateway returns "groupJid", not "groupId"
+            if group_jid:
+                storage.set_shadow_group_jid(group_jid)
+                print(f"[send_to_shadow] Created Shadow group: {group_jid}")
+            else:
+                print("[send_to_shadow] No group JID in response")
+                return False
+
+        payload = {
+            "to": group_jid,
+            "text": message,
+        }
+
+        response = requests.post(GATEWAY_SEND_URL, json=payload, timeout=10)
+        if response.status_code != 200:
+            print(f"[send_to_shadow] Failed: HTTP {response.status_code} - {response.text}")
+        return response.status_code == 200
+
+    except Exception as e:
+        print(f"[send_to_shadow] Error: {e}")
+        return False
+
+
+def _is_valid_e164(phone: str | None) -> bool:
+    """
+    Check if phone looks like valid E.164, not a LID or JID.
+
+    LID pattern: ends with @lid, typically 14+ digits starting with 0 or 4
+    JID pattern: ends with @s.whatsapp.net
+    E.164 pattern: country code (1-3) + number (7-12) = 10-13 digits
+    Brazilian: 55 + DDD(2) + number(8-9) = 12-13 digits
+    """
+    if not phone:
+        return False
+    # Explicit LID/JID check - these are NOT valid phones
+    phone_lower = phone.lower()
+    if "@lid" in phone_lower or "@s.whatsapp.net" in phone_lower:
+        return False
+    # Extract digits only
+    digits = phone.replace("+", "").split("@")[0].split(":")[0]
+    # LIDs are typically 14+ digits, E.164 is max 13
+    if len(digits) >= 14:
+        return False
+    # LIDs often start with 0
+    if digits.startswith("0"):
+        return False
+    # Valid phone: all digits, 10-13 chars (country code + number)
+    return digits.isdigit() and 10 <= len(digits) <= 13
+
+
+def _format_appointment_confirmation(
+    entity_data: dict[str, Any],
+    sender_name: str | None,
+    sender_phone: str | None,
+) -> str:
+    """
+    Formata mensagem de confirmação para compromisso detectado.
+
+    Quando o Shadow detecta um compromisso em conversa de terceiros,
+    ele pergunta ao owner se deve registrar.
+    """
+    title = entity_data.get("title") or entity_data.get("description") or "Compromisso"
+    date_str = entity_data.get("datetime") or entity_data.get("scheduled_at") or "não especificado"
+
+    # Format date nicely
+    if date_str and date_str != "não especificado":
+        try:
+            from datetime import datetime
+            dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+            date_str = dt.strftime("%d/%m/%Y às %H:%M")
+        except Exception:
+            pass
+
+    # Build contact info - graceful handling when phone unavailable
+    contact_info = sender_name or "Contato"
+    if sender_phone and sender_phone != sender_name and _is_valid_e164(sender_phone):
+        # Clean phone for display
+        phone_display = sender_phone
+        if "@" in phone_display:
+            phone_display = phone_display.split("@")[0]
+        if not phone_display.startswith("+"):
+            phone_display = f"+{phone_display}"
+        contact_info = f"{sender_name or 'Contato'} ({phone_display})"
+    # else: just use name, no corrupted phone display
+
+    return (
+        f"📅 *Compromisso detectado*\n\n"
+        f"Com: {contact_info}\n"
+        f"O quê: {title}\n"
+        f"Quando: {date_str}\n\n"
+        f"Quer que eu registre e crie um lembrete?\n"
+        f"Responda *Sim* ou *Não*"
+    )
+
+
+def _detect_confirmation_response(message: str) -> str | None:
+    """
+    Detecta se a mensagem é uma resposta a confirmação pendente.
+
+    Retorna "yes", "no", ou None se não reconheceu.
+    """
+    msg = message.lower().strip()
+
+    # Positive responses
+    if msg in ["sim", "s", "yes", "y", "ok", "pode", "registra", "1", "aceito", "aceitar"]:
+        return "yes"
+
+    # Negative responses
+    if msg in ["não", "nao", "n", "no", "cancela", "descarta", "2", "ignorar", "ignora"]:
+        return "no"
+
+    return None
+
+
+def _execute_pending_action(
+    pending,  # PendingConfirmation
+    storage: Storage,
+    owner_phone: str,
+    session_id: str | None,
+) -> str:
+    """
+    Executa a ação de uma confirmação pendente aceita.
+
+    Cria o compromisso/tarefa e retorna mensagem de sucesso.
+    """
+    entity_data = pending.entity_data
+    confirmation_type = pending.confirmation_type
+
+    if confirmation_type == "create_appointment":
+        # Create appointment
+        title = entity_data.get("title") or entity_data.get("description") or "Compromisso"
+        scheduled_at = entity_data.get("datetime") or entity_data.get("scheduled_at")
+
+        if not scheduled_at:
+            return "Não consegui identificar a data do compromisso. Tente novamente com: agenda: [descrição] [data/hora]"
+
+        appt = storage.create_appointment(title, scheduled_at)
+
+        # Also create a reminder 30 min before
+        try:
+            from datetime import datetime, timedelta
+            dt = datetime.fromisoformat(scheduled_at.replace("Z", "+00:00"))
+            remind_at = (dt - timedelta(minutes=30)).isoformat()
+            storage.create_reminder(remind_at, f"Lembrete: {title}")
+        except Exception:
+            pass
+
+        # Format response
+        contact_info = ""
+        if pending.sender_name:
+            contact_info = f" com {pending.sender_name}"
+
+        return f"✅ Compromisso registrado: {title}{contact_info}\nLembrete criado para 30 minutos antes."
+
+    elif confirmation_type == "create_task":
+        # Create task
+        title = entity_data.get("title") or entity_data.get("description") or "Tarefa"
+        due_at = entity_data.get("due_date") or entity_data.get("datetime")
+
+        task = storage.create_task(title, due_at)
+        return f"✅ Tarefa registrada: {title}"
+
+    return "Ação executada."
+
+
+def _should_extract_entities(
+    storage: Storage,
+    owner_id: str,
+    chat_type: str,
+    chat_id: str | None,
+) -> bool:
+    """
+    Decide if we should extract entities from this message.
+
+    For private chats: always extract
+    For groups: check user settings (group_monitoring_enabled) and monitored list
+
+    Args:
+        storage: Storage instance
+        owner_id: Owner phone E.164
+        chat_type: "direct" or "group"
+        chat_id: WhatsApp chat JID
+
+    Returns:
+        True if should extract entities, False otherwise
+    """
+    # Always extract from private/direct chats
+    if chat_type == "direct" or (chat_id and "@s.whatsapp.net" in chat_id):
+        return True
+
+    # For groups, check user settings
+    if not chat_id:
+        return False
+
+    try:
+        settings = storage.get_user_settings(owner_id)
+
+        # Check if group monitoring is enabled globally
+        group_monitoring = settings.get("group_monitoring_enabled", 0)
+        if group_monitoring:
+            return True
+
+        # Check if this specific group is in the monitored list
+        monitored_groups = storage.get_monitored_groups(owner_id)
+        if chat_id in monitored_groups:
+            return True
+
+        # Also check without @g.us suffix for flexibility
+        chat_base = chat_id.split("@")[0] if "@" in chat_id else chat_id
+        for group in monitored_groups:
+            group_base = group.split("@")[0] if "@" in group else group
+            if chat_base == group_base:
+                return True
+
+        return False
+
+    except Exception as e:
+        print(f"[extract] Error checking group settings: {e}")
+        # Default to NOT extracting on error (safer)
+        return False
+
+
+def _check_immediate_suggestion(
+    entities: list,
+    sender_phone: str | None,
+    sender_name: str | None,
+    owner_phone: str,
+    chat_id: str | None,
+    session_store,
+    storage: Storage | None = None,
+) -> bool:
+    """
+    Verifica se alguma entidade extraída precisa de confirmação imediata.
+
+    Quando detecta um compromisso/reunião, pergunta IMEDIATAMENTE ao owner
+    via Grupo Shadow (toda comunicação do Shadow fica em um único lugar).
+
+    Tarefas vão para a fila de sugestões (não pergunta inline).
+
+    Retorna True se enviou pergunta de confirmação.
+
+    Note: This is intentionally sync - _send_to_shadow_group uses requests which is blocking.
+    """
+    if not session_store or not storage:
+        return False
+
+    for entity in entities:
+        entity_type = entity.entity_type if hasattr(entity, 'entity_type') else entity.get('entity_type')
+        entity_data = entity.data if hasattr(entity, 'data') else entity.get('data', {})
+
+        # Only immediate confirmation for appointments/meetings
+        if entity_type in ["meeting", "appointment"]:
+            # Format and send confirmation message to Shadow group
+            msg = _format_appointment_confirmation(entity_data, sender_name, sender_phone)
+            sent = _send_to_shadow_group(storage, msg)
+
+            if sent:
+                # Store pending confirmation
+                session_store.set_pending_confirmation(
+                    owner_id=owner_phone,
+                    confirmation_type="create_appointment",
+                    entity_data=entity_data,
+                    sender_phone=sender_phone,
+                    sender_name=sender_name,
+                    source_chat_id=chat_id,
+                    expires_in_seconds=300,  # 5 minutes
+                )
+                print(f"[immediate] Sent appointment confirmation to Shadow group")
+                return True
+
+    return False
+
+
+def _update_contact_context_with_entities(
+    storage: Storage,
+    owner_id: str,
+    contact_phone: str,
+    entities: list,
+) -> None:
+    """
+    Update contact context with information extracted from entities.
+
+    Phase 8F: Context update contínuo.
+    When entities are extracted from a conversation, update the contact's
+    context with relevant information (email, company, preferences, etc).
+    """
+    if not entities or not contact_phone:
+        return
+
+    context_updates = {}
+    topics_to_add = []
+
+    for entity in entities:
+        entity_type = entity.entity_type if hasattr(entity, 'entity_type') else entity.get('entity_type')
+        entity_data = entity.data if hasattr(entity, 'data') else entity.get('data', {})
+
+        if entity_type == "meeting" or entity_type == "appointment":
+            # Contact has pending appointments
+            context_updates["has_pending_appointments"] = True
+            topics_to_add.append("reuniões")
+
+        elif entity_type == "task":
+            # Contact has pending tasks
+            context_updates["has_pending_tasks"] = True
+            topics_to_add.append("tarefas")
+
+        elif entity_type == "contact":
+            # Contact info extracted - update profile data
+            if entity_data.get("email"):
+                context_updates["email"] = entity_data["email"]
+            if entity_data.get("company") or entity_data.get("empresa"):
+                context_updates["company"] = entity_data.get("company") or entity_data.get("empresa")
+            if entity_data.get("role") or entity_data.get("cargo"):
+                context_updates["role"] = entity_data.get("role") or entity_data.get("cargo")
+            if entity_data.get("nickname") or entity_data.get("apelido"):
+                # Add alias
+                nickname = entity_data.get("nickname") or entity_data.get("apelido")
+                try:
+                    storage.add_contact_alias(owner_id, contact_phone, nickname)
+                except Exception:
+                    pass
+
+        elif entity_type == "reminder":
+            topics_to_add.append("lembretes")
+
+    # Update context if we have changes
+    if context_updates or topics_to_add:
+        try:
+            # Get current context
+            current = storage.get_contact_context(owner_id, contact_phone=contact_phone)
+            if current:
+                # Merge topics
+                current_topics = current.get("topics") or []
+                if isinstance(current_topics, str):
+                    import json
+                    try:
+                        current_topics = json.loads(current_topics)
+                    except Exception:
+                        current_topics = []
+
+                # Add new topics (avoid duplicates)
+                for topic in topics_to_add:
+                    if topic not in current_topics:
+                        current_topics.append(topic)
+
+                # Keep only last 10 topics
+                context_updates["topics"] = current_topics[-10:]
+
+            # Update the context
+            storage.update_contact_context_fields(owner_id, contact_phone, context_updates)
+            print(f"[context] Updated context for {contact_phone}: {list(context_updates.keys())}")
+
+        except Exception as e:
+            print(f"[context] Error updating context: {e}")
+
 
 TASK_PATTERNS = [
     r"^tarefa[:\s]+(.+)$",
@@ -204,8 +581,11 @@ def _extract_and_store_entities(
     chat_type: str,
     session: Any,
     session_store: SessionStore | None,
-) -> None:
-    """Extract entities from message and store them (runs synchronously)."""
+):
+    """Extract entities from message and store them (runs synchronously).
+
+    Returns the extraction result for immediate suggestion checking.
+    """
     extractor = _get_entity_extractor()
     if not extractor:
         return
@@ -242,6 +622,8 @@ def _extract_and_store_entities(
             entity_type=entity.entity_type,
             entity_data=entity.data,
             confidence=entity.confidence,
+            sender_phone=sender_phone,  # Phase 7: Real sender phone for contact association
+            sender_name=sender_name,    # Phase 7: Real sender name (push name)
         )
 
         # Auto-link tasks to contacts (Phase 2)
@@ -297,6 +679,8 @@ def _extract_and_store_entities(
             )
         except Exception:
             pass  # Don't fail message processing if memory capture fails
+
+    return result
 
 
 def _format_today_tasks(tasks: list[dict[str, Any]]) -> str:
@@ -451,12 +835,14 @@ def handle_message(
     """
     body = (payload.get("body") or payload.get("content") or "").strip()
     sender = payload.get("sender_e164") or payload.get("contact_phone")
+    sender_jid = payload.get("sender_jid")  # Fallback when E.164 resolution fails
     sender_name = payload.get("sender_name")
     owner = payload.get("owner_e164") or payload.get("user_phone")
     is_owner = payload.get("is_owner") if payload.get("is_owner") is not None else sender == owner
     chat_id = payload.get("chat_id") or payload.get("metadata", {}).get("remoteJid")
     chat_type = payload.get("chat_type") or "direct"
     should_reply = payload.get("should_reply")
+    monitor_only = payload.get("monitor_only", False)  # Phase 7: Monitored messages
 
     # Phase 7B: Transcrever áudio se presente
     media_type = payload.get("media_type")
@@ -498,25 +884,67 @@ def handle_message(
     if body:
         storage.ingest_message(chat_id, chat_type, sender, sender_name, body, "inbound", bool(is_owner))
 
-        # Entity extraction for ALL contact messages (Shadow reads everything)
+        # Entity extraction for contact messages (respects group monitoring settings)
         # Extract from contacts (not owner) to build context and identify tasks
-        if body and sender and not is_owner:
+        # Phase 7: Also extract from monitored messages even when sender_e164 is null
+        # Phase 8: Respect group monitoring settings - only extract from monitored groups
+        sender_identifier = sender or sender_jid  # Use JID as fallback
+        should_extract = (
+            body
+            and sender_identifier
+            and not is_owner
+            and _should_extract_entities(storage, owner, chat_type, chat_id)
+        )
+        if should_extract:
             try:
-                _extract_and_store_entities(
+                extraction_result = _extract_and_store_entities(
                     storage=storage,
                     owner_id=owner,
                     message=body,
                     chat_id=chat_id,
                     message_id=payload.get("message_id"),
                     sender_name=sender_name,
-                    sender_phone=sender,
+                    sender_phone=sender_identifier,  # Can be phone or JID
                     chat_type=chat_type,
                     session=session,
                     session_store=session_store,
                 )
+                if monitor_only:
+                    print(f"[entity] Extracted from monitored message: {body[:50]}...")
+
+                # Phase 8: Check for immediate suggestions (appointments)
+                # Send confirmation to owner if meeting/appointment detected
+                if owner and extraction_result and extraction_result.entities:
+                    try:
+                        sent_confirmation = _check_immediate_suggestion(
+                            entities=extraction_result.entities,
+                            sender_phone=sender_identifier,
+                            sender_name=sender_name,
+                            owner_phone=owner,
+                            chat_id=chat_id,
+                            session_store=session_store,
+                            storage=storage,
+                        )
+                        if sent_confirmation:
+                            print(f"[immediate] Sent confirmation request to Shadow group for appointment")
+                    except Exception as e:
+                        print(f"[immediate] Error checking immediate suggestions: {e}")
+
+                    # Phase 8F: Update contact context with entity info
+                    try:
+                        _update_contact_context_with_entities(
+                            storage=storage,
+                            owner_id=owner,
+                            contact_phone=sender_identifier,
+                            entities=extraction_result.entities,
+                        )
+                    except Exception as e:
+                        print(f"[context] Error updating context with entities: {e}")
+
             except Exception as e:
                 # Don't fail message processing if extraction fails
-                pass
+                if monitor_only:
+                    print(f"[entity] Extraction failed for monitored message: {e}")
 
     if not body:
         return {"reply": None, "intent": "none", "actions": [], "session_id": session.id if session else None}
@@ -530,6 +958,58 @@ def handle_message(
 
     lower = body.lower()
     session_id = session.id if session else None
+
+    # Phase 8: Check for pending confirmations (CRM Oculto)
+    # If owner has a pending confirmation, check if this message is a response
+    if is_owner and session_store and owner:
+        pending = session_store.get_pending_confirmation(owner)
+        if pending and not pending.is_expired():
+            response = _detect_confirmation_response(body)
+
+            if response == "yes":
+                # Execute the pending action
+                result = _execute_pending_action(pending, storage, owner, session_id)
+                session_store.clear_pending_confirmation(owner)
+
+                # Record and return
+                storage.record_interaction(sender, body, result, "confirmation_accepted")
+                if session_store and session_id:
+                    session_store.add_message(session_id, ContextMessage(
+                        role="assistant",
+                        content=result,
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        metadata={"intent": "confirmation_accepted"},
+                    ))
+
+                return {
+                    "reply": result,
+                    "intent": "confirmation_accepted",
+                    "actions": ["appointment_created"] if pending.confirmation_type == "create_appointment" else ["task_created"],
+                    "session_id": session_id,
+                }
+
+            elif response == "no":
+                session_store.clear_pending_confirmation(owner)
+                result = "Ok, descartado."
+
+                storage.record_interaction(sender, body, result, "confirmation_rejected")
+                if session_store and session_id:
+                    session_store.add_message(session_id, ContextMessage(
+                        role="assistant",
+                        content=result,
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        metadata={"intent": "confirmation_rejected"},
+                    ))
+
+                return {
+                    "reply": result,
+                    "intent": "confirmation_rejected",
+                    "actions": [],
+                    "session_id": session_id,
+                }
+
+            # If not a clear yes/no, continue normal processing
+            # but still allow the user to respond naturally
 
     # Guardrail: prompt injection detection (block tool usage)
     injection = detect_prompt_injection(body)
@@ -565,6 +1045,43 @@ def handle_message(
                     pass
     except Exception as e:
         print(f"[learning] Feedback detection error: {e}")
+
+    # Phase 7: Check for suggestion responses
+    try:
+        from suggestions import SuggestionResponder, get_pending_for_owner
+
+        pending_suggestions = get_pending_for_owner(storage, owner)
+        if pending_suggestions:
+            responder = SuggestionResponder(storage, _get_tool_registry())
+            suggestion_response = responder.detect_response(body, pending_suggestions)
+
+            if suggestion_response:
+                # Handle the suggestion response
+                tool_context = ToolContext(
+                    user_phone=owner,
+                    session_id=session_id,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    storage=storage,
+                )
+                result = _run_async(responder.handle_response(
+                    suggestion_response,
+                    pending_suggestions,
+                    tool_context,
+                ))
+
+                if result and result.get("reply"):
+                    storage.record_interaction(sender, body, result["reply"], "suggestion_response")
+                    _record_response(session_store, session_id, result["reply"], "suggestion_response")
+                    return {
+                        "reply": result["reply"],
+                        "intent": "suggestion_response",
+                        "actions": result.get("actions", []),
+                        "session_id": session_id,
+                    }
+    except ImportError:
+        pass  # Suggestions module not installed
+    except Exception as e:
+        print(f"[suggestions] Response detection error: {e}")
 
     # Helper para retornar resultado e registrar no contexto
     def make_result(reply: str, intent: str, actions: list[str] | None = None) -> dict[str, Any]:
@@ -787,18 +1304,34 @@ def handle_message(
             # Run ReAct loop
             state = agent.run(body, tool_context)
 
-            if state.status == AgentStatus.DONE and state.final_response:
-                # Use last tool name as intent, or "agent_response" if no tools used
+            # Handle successful completion with response
+            if state.final_response:
                 intent = state.last_tool or "agent_response"
+                if state.status == AgentStatus.ERROR:
+                    intent = "agent_error"
                 return make_result(state.final_response, intent)
 
-            if state.status == AgentStatus.ERROR and state.final_response:
-                return make_result(state.final_response, "agent_error")
+            # Handle edge case: agent finished but no response
+            # Try to extract thought from last step
+            for step in reversed(state.steps):
+                if step.thought:
+                    return make_result(step.thought, "agent_thought")
+
+            # Last resort: inform user that processing failed
+            return make_result(
+                "Não consegui processar sua solicitação. Tente reformular.",
+                "agent_no_response"
+            )
 
     except Exception as e:
         print(f"[react_agent] Error: {e}")
         import traceback
         traceback.print_exc()
+        # Return error message to user instead of falling through
+        return make_result(
+            "Ocorreu um erro ao processar. Tente novamente.",
+            "agent_exception"
+        )
 
-    # Fallback original
+    # Fallback for fast-path messages that weren't handled above
     return make_result("Anotado. Se quiser criar tarefas ou lembretes, me diga diretamente.", "note")

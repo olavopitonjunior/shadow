@@ -1,8 +1,13 @@
 /**
- * Shadow Reminder Edge Function
+ * DEPRECATED: This function is being migrated to local scheduler.py
+ * See shadow/agent/scheduler.py for the new implementation.
+ * Kept for potential Business API integration in SaaS version.
  *
- * Processa lembretes pendentes e envia via WhatsApp.
- * Suporta Evolution API e Z-API como gateways.
+ * This file depends on Evolution/Z-API adapters which have been removed.
+ * The local Baileys gateway is now the primary integration.
+ *
+ * Original description:
+ * Shadow Reminder Edge Function - Processa lembretes pendentes e envia via WhatsApp.
  */
 
 import { serve } from "https://deno.land/std@0.208.0/http/server.ts";
@@ -12,126 +17,101 @@ import {
   corsJsonResponse,
   corsErrorResponse,
 } from "../_shared/cors.ts";
+import {
+  resolveAdapter,
+  sendTextWithFallback,
+  type ShadowConfig,
+  type SendResult as AdapterSendResult,
+} from "../_shared/adapters/index.ts";
+import {
+  resolveRecipient,
+  type RecipientContext,
+  type ResolvedRecipient,
+} from "../_shared/recipient-resolver.ts";
+import { decryptText } from "../_shared/crypto.ts";
 
-interface ShadowConfig {
-  owner_phone?: string;
-  evolution_api_url?: string;
-  evolution_api_key?: string;
-  evolution_instance?: string;
-  zapi_instance_id?: string;
-  zapi_token?: string;
-  enable_shadow_replies?: boolean;
-}
-
-interface SendResult {
+interface ReminderSendResult {
   reminder_id: string;
   success: boolean;
   error?: string;
+  attempts?: number;
+  adapter?: string;
+  /** How recipient was resolved (Phase 4) */
+  recipient_source?: string;
+  /** Target phone used */
+  recipient?: string;
+}
+
+interface RetryPolicy {
+  maxAttempts: number;
+  initialDelayMs: number;
+  backoffMultiplier: number;
+  maxDelayMs: number;
+}
+
+const DEFAULT_RETRY_POLICY: RetryPolicy = {
+  maxAttempts: 3,
+  initialDelayMs: 1000,
+  backoffMultiplier: 2,
+  maxDelayMs: 30000,
+};
+
+/**
+ * Aguarda um período de tempo (para retry backoff)
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
- * Envia mensagem via Evolution API
+ * Calcula o delay para a próxima tentativa usando backoff exponencial
  */
-async function sendViaEvolution(
-  config: ShadowConfig,
+function calculateBackoffDelay(attempt: number, policy: RetryPolicy): number {
+  const delay = policy.initialDelayMs * Math.pow(policy.backoffMultiplier, attempt - 1);
+  return Math.min(delay, policy.maxDelayMs);
+}
+
+/**
+ * Envia mensagem com retry e backoff exponencial usando adapters
+ */
+async function sendMessageWithRetry(
+  config: ShadowConfig & { owner_phone?: string },
   phone: string,
-  message: string
-): Promise<boolean> {
-  if (!config.evolution_api_url || !config.evolution_api_key || !config.evolution_instance) {
-    console.log("[reminder] Evolution API not configured");
-    return false;
-  }
+  message: string,
+  policy: RetryPolicy = DEFAULT_RETRY_POLICY
+): Promise<{ success: boolean; attempts: number; lastError?: string; adapter?: string }> {
+  let lastError: string | undefined;
+  let lastAdapter: string | undefined;
 
-  const url = `${config.evolution_api_url}/message/sendText/${config.evolution_instance}`;
+  for (let attempt = 1; attempt <= policy.maxAttempts; attempt++) {
+    console.log(`[reminder] Attempt ${attempt}/${policy.maxAttempts}`);
 
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        apikey: config.evolution_api_key,
-      },
-      body: JSON.stringify({
-        number: phone.replace(/\D/g, ""),
-        text: message,
-      }),
-    });
+    // Usa sendTextWithFallback para tentar todos os adapters disponíveis
+    const result = await sendTextWithFallback(config, phone, message);
+    lastAdapter = result.adapter;
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("[reminder] Evolution API error:", errorText);
-      return false;
+    if (result.success) {
+      console.log(`[reminder] Message sent via ${result.adapter} on attempt ${attempt}`);
+      return { success: true, attempts: attempt, adapter: result.adapter };
     }
 
-    console.log("[reminder] Message sent via Evolution API");
-    return true;
-  } catch (error) {
-    console.error("[reminder] Evolution API error:", error);
-    return false;
-  }
-}
+    lastError = result.error;
+    console.log(`[reminder] Attempt ${attempt} failed: ${lastError}`);
 
-/**
- * Envia mensagem via Z-API
- */
-async function sendViaZapi(
-  config: ShadowConfig,
-  phone: string,
-  message: string
-): Promise<boolean> {
-  if (!config.zapi_instance_id || !config.zapi_token) {
-    console.log("[reminder] Z-API not configured");
-    return false;
-  }
-
-  const url = `https://api.z-api.io/instances/${config.zapi_instance_id}/token/${config.zapi_token}/send-text`;
-
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        phone: phone.replace(/\D/g, ""),
-        message: message,
-      }),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("[reminder] Z-API error:", errorText);
-      return false;
+    // Se não é a última tentativa, aguarda antes de retry
+    if (attempt < policy.maxAttempts) {
+      const delay = calculateBackoffDelay(attempt, policy);
+      console.log(`[reminder] Waiting ${delay}ms before retry...`);
+      await sleep(delay);
     }
-
-    console.log("[reminder] Message sent via Z-API");
-    return true;
-  } catch (error) {
-    console.error("[reminder] Z-API error:", error);
-    return false;
-  }
-}
-
-/**
- * Envia mensagem usando o gateway configurado
- */
-async function sendMessage(
-  config: ShadowConfig,
-  phone: string,
-  message: string
-): Promise<boolean> {
-  // Tenta Evolution API primeiro
-  if (config.evolution_api_url) {
-    return await sendViaEvolution(config, phone, message);
   }
 
-  // Fallback para Z-API
-  if (config.zapi_instance_id) {
-    return await sendViaZapi(config, phone, message);
-  }
-
-  console.log("[reminder] No WhatsApp gateway configured");
-  return false;
+  return {
+    success: false,
+    attempts: policy.maxAttempts,
+    lastError,
+    adapter: lastAdapter,
+  };
 }
 
 serve(async (req: Request) => {
@@ -154,50 +134,125 @@ serve(async (req: Request) => {
       .limit(1)
       .single();
 
-    const config: ShadowConfig = configData || {};
+    const config = (configData || {}) as ShadowConfig & { owner_phone?: string };
 
+    // Note: owner_phone is now optional as reminders can have their own target_phone
+    // But we warn if neither is available as a fallback
     if (!config.owner_phone) {
+      console.warn("[reminder] No owner_phone configured - reminders without target_phone will fail");
+    }
+
+    // Verifica se há pelo menos um adapter configurado
+    const adapter = resolveAdapter(config);
+    if (!adapter) {
       return corsJsonResponse(
-        { ok: false, error: "owner_phone not configured" },
+        { ok: false, error: "No WhatsApp gateway configured (Evolution API or Z-API)" },
         400,
         req
       );
     }
 
-    // Busca lembretes pendentes
+    // Busca lembretes pendentes (excluindo falhas permanentes)
     const nowIso = new Date().toISOString();
     const { data: reminders, error } = await supabase
       .from("shadow_reminders")
       .select("*")
       .eq("sent", false)
+      .eq("failed", false)
       .lte("remind_at", nowIso)
       .limit(50);
 
     if (error) throw error;
 
-    const results: SendResult[] = [];
+    const results: ReminderSendResult[] = [];
 
     for (const reminder of reminders ?? []) {
-      const reminderMessage = `🔔 Lembrete: ${reminder.message}`;
+      const decrypted = await decryptText(reminder.message ?? "", reminder.user_id ?? "unknown", "reminder:message");
+      const reminderMessage = `🔔 Lembrete: ${decrypted}`;
+      const previousAttempts = reminder.attempts ?? 0;
 
-      // Tenta enviar via WhatsApp
-      const sent = await sendMessage(config, config.owner_phone, reminderMessage);
+      // Resolve recipient using priority chain (Phase 4)
+      const recipientContext: RecipientContext = {
+        reminderTarget: reminder.target_phone, // From reminder record
+        ownerPhone: config.owner_phone, // Fallback to config
+        // allowlist could be added from config if needed
+      };
 
-      if (sent) {
-        // Marca como enviado
-        await supabase
-          .from("shadow_reminders")
-          .update({ sent: true })
-          .eq("id", reminder.id);
+      const resolved = resolveRecipient(recipientContext);
 
-        results.push({ reminder_id: reminder.id, success: true });
-      } else {
-        // Registra falha mas não marca como enviado (tentará novamente)
+      if (!resolved) {
+        console.log(`[reminder] No valid recipient for reminder ${reminder.id}`);
         results.push({
           reminder_id: reminder.id,
           success: false,
-          error: "Failed to send message",
+          error: "No valid recipient could be resolved",
         });
+        continue;
+      }
+
+      console.log(
+        `[reminder] Resolved recipient: ${resolved.phone} (source: ${resolved.source})`
+      );
+
+      // Tenta enviar via WhatsApp com retry
+      const sendResult = await sendMessageWithRetry(
+        config,
+        resolved.phone,
+        reminderMessage
+      );
+
+      const totalAttempts = previousAttempts + sendResult.attempts;
+
+      if (sendResult.success) {
+        // Marca como enviado
+        await supabase
+          .from("shadow_reminders")
+          .update({
+            sent: true,
+            attempts: totalAttempts,
+            last_error: null,
+            sent_at: new Date().toISOString(),
+          })
+          .eq("id", reminder.id);
+
+        results.push({
+          reminder_id: reminder.id,
+          success: true,
+          attempts: totalAttempts,
+          adapter: sendResult.adapter,
+          recipient_source: resolved.source,
+          recipient: resolved.phone,
+        });
+      } else {
+        // Registra falha e incrementa tentativas
+        const maxTotalAttempts = 9; // 3 execuções x 3 retries cada
+        const shouldGiveUp = totalAttempts >= maxTotalAttempts;
+
+        await supabase
+          .from("shadow_reminders")
+          .update({
+            attempts: totalAttempts,
+            last_error: sendResult.lastError,
+            // Se atingiu máximo de tentativas, marca como "falha permanente"
+            ...(shouldGiveUp && { sent: true, failed: true }),
+          })
+          .eq("id", reminder.id);
+
+        results.push({
+          reminder_id: reminder.id,
+          success: false,
+          error: sendResult.lastError,
+          attempts: totalAttempts,
+          adapter: sendResult.adapter,
+          recipient_source: resolved.source,
+          recipient: resolved.phone,
+        });
+
+        if (shouldGiveUp) {
+          console.log(
+            `[reminder] Giving up on reminder ${reminder.id} after ${totalAttempts} total attempts`
+          );
+        }
       }
     }
 
@@ -210,6 +265,7 @@ serve(async (req: Request) => {
         processed_count: results.length,
         success_count: successCount,
         fail_count: failCount,
+        adapter_used: adapter.name,
         results,
       },
       200,

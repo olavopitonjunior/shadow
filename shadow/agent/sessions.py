@@ -22,6 +22,54 @@ from crypto import get_crypto
 
 
 @dataclass
+class PendingConfirmation:
+    """
+    Confirmação pendente de ação (Phase 8 - CRM Oculto).
+
+    Quando o Shadow detecta um compromisso em conversa de terceiros,
+    ele pergunta ao owner se deve registrar. Esta estrutura rastreia
+    a confirmação pendente.
+    """
+    confirmation_type: str  # "create_appointment", "create_task", etc.
+    entity_data: dict[str, Any]
+    sender_phone: str | None
+    sender_name: str | None
+    source_chat_id: str | None
+    created_at: str
+    expires_at: str
+
+    def is_expired(self) -> bool:
+        """Check if confirmation has expired."""
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        expires = datetime.fromisoformat(self.expires_at.replace("Z", "+00:00"))
+        return now > expires
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "confirmation_type": self.confirmation_type,
+            "entity_data": self.entity_data,
+            "sender_phone": self.sender_phone,
+            "sender_name": self.sender_name,
+            "source_chat_id": self.source_chat_id,
+            "created_at": self.created_at,
+            "expires_at": self.expires_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "PendingConfirmation":
+        return cls(
+            confirmation_type=data.get("confirmation_type", "unknown"),
+            entity_data=data.get("entity_data", {}),
+            sender_phone=data.get("sender_phone"),
+            sender_name=data.get("sender_name"),
+            source_chat_id=data.get("source_chat_id"),
+            created_at=data.get("created_at", ""),
+            expires_at=data.get("expires_at", ""),
+        )
+
+
+@dataclass
 class ContextMessage:
     """Uma mensagem no contexto da sessão."""
     role: Literal["user", "assistant", "system"]
@@ -204,6 +252,16 @@ class SessionStore:
 
         # Migration: Add recipient tracking columns if not exist (Phase 4)
         self._migrate_recipient_columns(cur)
+
+        # Phase 8: Pending confirmations table for CRM Oculto
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS pending_confirmations (
+                owner_id TEXT PRIMARY KEY,
+                confirmation_data TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            )
+        """)
 
         self._conn.commit()
 
@@ -574,6 +632,103 @@ class SessionStore:
         """, (cutoff,))
         self._conn.commit()
         return cur.rowcount
+
+    # === Pending Confirmations (Phase 8 - CRM Oculto) ===
+
+    def set_pending_confirmation(
+        self,
+        owner_id: str,
+        confirmation_type: str,
+        entity_data: dict[str, Any],
+        sender_phone: str | None = None,
+        sender_name: str | None = None,
+        source_chat_id: str | None = None,
+        expires_in_seconds: int = 300,
+    ) -> None:
+        """
+        Define uma confirmação pendente para o owner.
+
+        Quando o Shadow detecta um compromisso em conversa de terceiros,
+        ele cria uma confirmação pendente e pergunta ao owner.
+
+        Args:
+            owner_id: Telefone E.164 do owner
+            confirmation_type: Tipo de ação ("create_appointment", "create_task")
+            entity_data: Dados da entidade extraída
+            sender_phone: Telefone de quem enviou a mensagem original
+            sender_name: Nome de quem enviou a mensagem original
+            source_chat_id: Chat de onde veio a mensagem
+            expires_in_seconds: Tempo até expirar (default: 5 min)
+        """
+        from datetime import timedelta
+
+        now = datetime.now(timezone.utc)
+        expires_at = now + timedelta(seconds=expires_in_seconds)
+
+        confirmation = PendingConfirmation(
+            confirmation_type=confirmation_type,
+            entity_data=entity_data,
+            sender_phone=sender_phone,
+            sender_name=sender_name,
+            source_chat_id=source_chat_id,
+            created_at=now.isoformat(),
+            expires_at=expires_at.isoformat(),
+        )
+
+        cur = self._conn.cursor()
+        cur.execute("""
+            INSERT OR REPLACE INTO pending_confirmations (
+                owner_id, confirmation_data, created_at, expires_at
+            ) VALUES (?, ?, ?, ?)
+        """, (
+            owner_id,
+            self.crypto.encrypt_json(confirmation.to_dict(), aad="pending:confirmation"),
+            confirmation.created_at,
+            confirmation.expires_at,
+        ))
+        self._conn.commit()
+
+    def get_pending_confirmation(self, owner_id: str) -> PendingConfirmation | None:
+        """
+        Obtém confirmação pendente para o owner.
+
+        Retorna None se não houver confirmação ou se expirou.
+        """
+        cur = self._conn.cursor()
+        cur.execute("""
+            SELECT confirmation_data, expires_at
+            FROM pending_confirmations
+            WHERE owner_id = ?
+        """, (owner_id,))
+
+        row = cur.fetchone()
+        if not row:
+            return None
+
+        # Check expiration
+        expires_at = row[1]
+        if expires_at:
+            expires = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+            if datetime.now(timezone.utc) > expires:
+                # Expired - clean up
+                self.clear_pending_confirmation(owner_id)
+                return None
+
+        # Decrypt and return
+        data = self.crypto.decrypt_json(row[0], default={})
+        if not data:
+            return None
+
+        return PendingConfirmation.from_dict(data)
+
+    def clear_pending_confirmation(self, owner_id: str) -> None:
+        """Remove confirmação pendente do owner."""
+        cur = self._conn.cursor()
+        cur.execute(
+            "DELETE FROM pending_confirmations WHERE owner_id = ?",
+            (owner_id,)
+        )
+        self._conn.commit()
 
     # === Recipient Tracking (Phase 4 - moltbot pattern) ===
 

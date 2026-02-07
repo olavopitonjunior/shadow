@@ -1,3 +1,12 @@
+/**
+ * DEPRECATED: This function is being migrated to local scheduler.py
+ * See shadow/agent/scheduler.py for the new implementation.
+ * Kept for potential Business API integration in SaaS version.
+ *
+ * This file depends on Evolution/Z-API adapters which have been removed.
+ * The local Baileys gateway is now the primary integration.
+ */
+
 import { serve } from "https://deno.land/std@0.208.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
 import {
@@ -12,6 +21,7 @@ import {
   parseBoolean,
   type NormalizedMessage,
 } from "../_shared/shadow.ts";
+import { encryptText, decryptText } from "../_shared/crypto.ts";
 
 interface ShadowResponse {
   reply: string;
@@ -119,6 +129,7 @@ async function logWebhook(
   message: NormalizedMessage | null
 ) {
   try {
+    const logPayloads = Deno.env.get("SHADOW_LOG_PAYLOADS") === "1";
     const fallbackDirection =
       (payload as any)?.fromMe === true ? "outbound" : (payload as any)?.fromMe === false ? "inbound" : null;
     await supabase.from("shadow_webhook_logs").insert({
@@ -126,10 +137,10 @@ async function logWebhook(
       user_phone: message?.user_phone ?? null,
       contact_phone: message?.contact_phone ?? null,
       direction: message?.direction ?? fallbackDirection,
-      content: message?.content ?? null,
+      content: message?.content ? "[redacted]" : null,
       content_type: message?.content_type ?? null,
       is_group: message?.is_group ?? (payload as any)?.isGroup ?? null,
-      payload,
+      payload: logPayloads ? payload : null,
     });
   } catch {
     // ignore logging errors to avoid breaking webhook
@@ -177,6 +188,7 @@ async function handleShadowMessage(
   const conversation = await ensureConversation(supabase, user.id, contact.id);
   await insertMessage(
     supabase,
+    user.id,
     conversation.id,
     "inbound",
     { ...message, content: resolvedText } as NormalizedMessage
@@ -233,6 +245,7 @@ async function handleShadowMessage(
   if (config.enable_shadow_replies) {
     await insertMessage(
       supabase,
+      user.id,
       conversation.id,
       "outbound",
       {
@@ -336,14 +349,20 @@ async function ensureConversation(
 async function insertMessage(
   // deno-lint-ignore no-explicit-any
   supabase: any,
+  userId: string,
   conversationId: string,
   direction: "inbound" | "outbound",
   message: NormalizedMessage
 ) {
+  const encrypted = await encryptText(
+    message.content ?? "",
+    userId,
+    `msg:${conversationId}:${direction}`
+  );
   const { error } = await supabase.from("shadow_messages").insert({
     conversation_id: conversationId,
     direction,
-    content: message.content,
+    content: encrypted,
     content_type: message.content_type ?? "text",
     timestamp: message.timestamp ?? new Date().toISOString(),
   });
@@ -441,10 +460,12 @@ async function insertInteraction(
   intent: string,
   created: Record<string, string | undefined>
 ) {
+  const encUser = await encryptText(userMessage ?? "", userId, "interaction:user_message");
+  const encReply = await encryptText(shadowResponse ?? "", userId, "interaction:shadow_response");
   await supabase.from("shadow_interactions").insert({
     user_id: userId,
-    user_message: userMessage,
-    shadow_response: shadowResponse,
+    user_message: encUser,
+    shadow_response: encReply,
     intent,
     entities_created: created,
   });
@@ -479,6 +500,7 @@ async function processContactMessage(
   const summary = analysis.summary || contentText;
   await insertMessage(
     supabase,
+    userId,
     conversation.id,
     message.direction === "outbound" ? "outbound" : "inbound",
     {
@@ -768,7 +790,8 @@ async function isRecentEcho(
     .maybeSingle();
 
   if (!data?.shadow_response || !data?.timestamp) return false;
-  const last = normalizeText(data.shadow_response);
+  const decrypted = await decryptText(data.shadow_response, userId, "interaction:shadow_response");
+  const last = normalizeText(decrypted);
   if (!last || last !== normalized) return false;
 
   const age = Date.now() - new Date(data.timestamp).getTime();

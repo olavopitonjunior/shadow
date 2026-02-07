@@ -135,7 +135,7 @@ npm start
 cd shadow/agent
 pip install -r requirements.txt
 python -m main
-# → Servidor rodando em http://localhost:8000
+# → Servidor rodando em http://localhost:8090
 ```
 
 ### 2. Primeiro Uso
@@ -188,13 +188,13 @@ python -m main
 │                                                              │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │                 WhatsApp (Baileys)                    │   │
-│  │            Gateway Node.js - Porta 3001               │   │
+│  │            Gateway Node.js - Porta 18790              │   │
 │  └──────────────────────┬───────────────────────────────┘   │
 │                         │                                    │
 │                         ▼                                    │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │                  Agent Python                         │   │
-│  │              FastAPI - Porta 8000                     │   │
+│  │              FastAPI - Porta 8090                     │   │
 │  │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐     │   │
 │  │  │ Intent  │ │ Session │ │  Cron   │ │ Media   │     │   │
 │  │  │ Handler │ │  Store  │ │ Service │ │Processor│     │   │

@@ -32,12 +32,14 @@ const isOwner = (senderE164) => {
  * @param {string} params.senderJid - Sender JID
  * @param {string} params.ownerLid - Owner's LID
  * @param {boolean} params.isFromMe - If message is from self
- * @returns {{ allowed: boolean, reason: string }}
+ * @param {string} params.chatJid - Chat JID (for group monitoring)
+ * @param {string} params.chatType - "group" or "direct"
+ * @returns {{ allowed: boolean, reason: string, monitorOnly: boolean }}
  */
-const checkAccessAllowed = ({ senderE164, senderJid, ownerLid, isFromMe }) => {
+const checkAccessAllowed = ({ senderE164, senderJid, ownerLid, isFromMe, chatJid, chatType }) => {
   // Open mode: everyone is allowed
   if (config.accessMode === "open") {
-    return { allowed: true, reason: "open_mode" };
+    return { allowed: true, reason: "open_mode", monitorOnly: false };
   }
 
   // Check if sender is owner (multiple detection strategies)
@@ -46,14 +48,36 @@ const checkAccessAllowed = ({ senderE164, senderJid, ownerLid, isFromMe }) => {
   const ownerByLid = ownerLid && senderJid && normalizeLid(senderJid) === normalizeLid(ownerLid);
   const isOwnerCheck = ownerByFromMe || ownerByPhone || ownerByLid;
 
-  // Owner is always allowed
+  // Owner is always allowed (full access)
   if (isOwnerCheck) {
-    return { allowed: true, reason: "owner" };
+    return { allowed: true, reason: "owner", monitorOnly: false };
+  }
+
+  // Monitor ALL conversations mode (groups + direct messages)
+  if (config.monitorAllGroups) {
+    return { allowed: true, reason: "monitored_all", monitorOnly: true };
+  }
+
+  // Check if chat is a monitored group (for entity extraction)
+  if (chatType === "group" && chatJid) {
+    // Specific monitored groups
+    if (config.monitoredGroups && config.monitoredGroups.includes(chatJid)) {
+      return { allowed: true, reason: "monitored_group", monitorOnly: true };
+    }
+  }
+
+  // Check if sender is a monitored contact (for direct messages)
+  if (chatType === "direct" && senderJid) {
+    // Normalize to compare with configured contacts
+    const normalizedSender = senderE164 ? normalizeE164(senderE164) : null;
+    if (normalizedSender && config.monitoredContacts && config.monitoredContacts.includes(normalizedSender)) {
+      return { allowed: true, reason: "monitored_contact", monitorOnly: true };
+    }
   }
 
   // Owner-only mode: only owner allowed
   if (config.accessMode === "owner_only") {
-    return { allowed: false, reason: "not_owner" };
+    return { allowed: false, reason: "not_owner", monitorOnly: false };
   }
 
   // Allowlist mode: check if sender is in allowlist
@@ -61,13 +85,13 @@ const checkAccessAllowed = ({ senderE164, senderJid, ownerLid, isFromMe }) => {
     const normalizedSender = senderE164 ? normalizeE164(senderE164) : null;
     const inAllowlist = normalizedSender && config.allowlist.includes(normalizedSender);
     if (inAllowlist) {
-      return { allowed: true, reason: "allowlist" };
+      return { allowed: true, reason: "allowlist", monitorOnly: false };
     }
-    return { allowed: false, reason: "not_in_allowlist" };
+    return { allowed: false, reason: "not_in_allowlist", monitorOnly: false };
   }
 
   // Default: deny (unknown access mode)
-  return { allowed: false, reason: "unknown_mode" };
+  return { allowed: false, reason: "unknown_mode", monitorOnly: false };
 };
 
 const shouldReplyTo = ({ actualIsOwner, chatType, triggered, isSelfChat }) => {
@@ -243,6 +267,44 @@ Envie uma mensagem para comecar!`
       return;
     }
 
+    // Rota: GET /groups - listar grupos (ajuda a descobrir JIDs para monitoramento)
+    if (req.method === "GET" && req.url === "/groups") {
+      (async () => {
+        try {
+          const sock = getCurrentSocket();
+          if (!sock) {
+            res.statusCode = 503;
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ error: "Not connected" }));
+            return;
+          }
+
+          // Fetch groups from Baileys store
+          const groups = await sock.groupFetchAllParticipating();
+          const groupList = Object.entries(groups).map(([jid, meta]) => ({
+            jid,
+            name: meta.subject || "Unknown",
+            participants: meta.participants?.length || 0,
+            isMonitored: config.monitoredGroups?.includes(jid) || config.monitorAllGroups,
+          }));
+
+          res.statusCode = 200;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({
+            groups: groupList,
+            monitorAllGroups: config.monitorAllGroups,
+            monitoredGroups: config.monitoredGroups,
+          }));
+        } catch (err) {
+          logger.error({ err: String(err) }, "groups endpoint failed");
+          res.statusCode = 500;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: String(err) }));
+        }
+      })();
+      return;
+    }
+
     // Rota não encontrada
     res.statusCode = 404;
     res.end("Not found");
@@ -310,6 +372,14 @@ const main = async () => {
         continue;
       }
 
+      // Filter Shadow's own messages by prefix (failsafe for welcome/system messages)
+      const rawText = extractText(msg.message);
+      const shadowPrefix = config.selfChatPrefix || "[Shadow]";
+      if (rawText && rawText.toLowerCase().startsWith(shadowPrefix.toLowerCase())) {
+        logger.info({ text: rawText.substring(0, 40) }, "Skipped: Shadow prefix message");
+        continue;
+      }
+
       const remoteJid = msg.key.remoteJid;
       const chatType = isGroupJid(remoteJid) ? "group" : "direct";
 
@@ -356,7 +426,9 @@ const main = async () => {
         senderE164,
         senderJid,
         ownerLid,
-        isFromMe: msg.key.fromMe
+        isFromMe: msg.key.fromMe,
+        chatJid: remoteJid,
+        chatType,
       });
 
       if (!accessCheck.allowed) {
@@ -373,15 +445,23 @@ const main = async () => {
         continue;
       }
 
-      logger.debug({ accessMode: config.accessMode, reason: accessCheck.reason }, "Access granted");
+      logger.debug({ accessMode: config.accessMode, reason: accessCheck.reason, monitorOnly: accessCheck.monitorOnly }, "Access granted");
 
       const payload = normalizePayload({ msg, text, chatType, senderE164, senderJid, remoteJid, pushName: msg.pushName, isFromMe: msg.key.fromMe, ownerLid, resolvedVia, logger, mediaInfo });
+
+      // For monitored groups, force should_reply=false (entity extraction only)
+      if (accessCheck.monitorOnly) {
+        payload.should_reply = false;
+        payload.monitor_only = true;
+        logger.info({ chatJid: remoteJid, reason: accessCheck.reason }, "Monitor-only mode: capturing for entity extraction");
+      }
 
       logger.info({
         text: text.substring(0, 50),
         mediaType: mediaInfo?.type || null,
         senderE164,
         senderJid,
+        pushName: msg.pushName || null,
         ownerLid,
         chatType,
         is_owner: payload.is_owner,
@@ -408,6 +488,8 @@ const main = async () => {
         const isSelfChat = msg.key.fromMe && !isGroupJid(remoteJid);
 
         // Redirecionar self-chat para Shadow Group (evita problema do relógio)
+        // Note: mensagens monitoradas (monitor_only=true) não chegam aqui porque
+        // should_reply=false. O Python envia confirmações via /send endpoint.
         let replyJid = remoteJid;
         if (isSelfChat && config.shadowGroupJid) {
           replyJid = config.shadowGroupJid;

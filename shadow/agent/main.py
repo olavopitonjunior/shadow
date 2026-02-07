@@ -74,6 +74,7 @@ class ProcessRequest(BaseModel):
     chat_id: str | None = None
     chat_type: str | None = None
     sender_e164: str | None = None
+    sender_jid: str | None = None  # Phase 7: Fallback when E.164 resolution fails
     sender_name: str | None = None
     owner_e164: str | None = None
     body: str | None = None
@@ -81,6 +82,7 @@ class ProcessRequest(BaseModel):
     is_owner: bool | None = None
     triggered: bool | None = None
     should_reply: bool | None = None
+    monitor_only: bool | None = None  # Phase 7: Monitored messages (no reply)
     metadata: dict[str, Any] | None = None
 
     # Aliases para compatibilidade
@@ -92,6 +94,7 @@ class ProcessRequest(BaseModel):
     # Mídia (para futuro)
     media_url: str | None = None
     media_mime_type: str | None = None
+    media_type: str | None = None  # Phase 7B: Audio transcription
 
 
 def require_token(authorization: str | None = Header(default=None)) -> None:

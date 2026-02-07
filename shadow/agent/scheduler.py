@@ -141,6 +141,44 @@ class ShadowScheduler:
                 return {"status": "error", "error": f"{error_count} reminders failed"}
             return {"status": "ok", "sent": sent_count}
 
+        @self.cron_service.register_action("process_suggestions")
+        async def handle_process_suggestions(job: CronJob) -> dict:
+            """Processa entidades e envia sugestões proativas."""
+            if not self._http_client or not self.gateway_url:
+                return {"status": "skipped", "reason": "no_gateway"}
+
+            try:
+                from suggestions import SuggestionProcessor, SuggestionSender
+
+                # Get owner_id from config or job params
+                cfg = load_config()
+                owner_id = job.params.get("owner_id") or cfg.owner_e164
+
+                if not owner_id:
+                    return {"status": "skipped", "reason": "no_owner_id"}
+
+                # Process entities into suggestions
+                processor = SuggestionProcessor(self.storage)
+                new_suggestions = processor.process_pending_entities(owner_id)
+
+                # Send pending suggestions
+                sender = SuggestionSender(self.gateway_url, self.storage)
+                sent_count = await sender.send_pending(owner_id)
+
+                print(f"[scheduler] Suggestions: created={len(new_suggestions)}, sent={sent_count}")
+                return {
+                    "status": "ok",
+                    "created": len(new_suggestions),
+                    "sent": sent_count,
+                }
+
+            except ImportError as e:
+                print(f"[scheduler] Suggestions module not available: {e}")
+                return {"status": "skipped", "reason": "module_not_found"}
+            except Exception as e:
+                print(f"[scheduler] Error processing suggestions: {e}")
+                return {"status": "error", "error": str(e)}
+
         @self.cron_service.register_action("check_scheduled_alerts")
         async def handle_check_scheduled_alerts(job: CronJob) -> dict:
             """Verifica e envia alertas programados."""
@@ -362,6 +400,15 @@ class ShadowScheduler:
                 action="check_scheduled_alerts",
             ))
             print("[scheduler] Created 'check_scheduled_alerts' job")
+
+        # Job de processamento de sugestões proativas (a cada 5 minutos)
+        if "process_suggestions" not in existing_actions:
+            await self.cron_service.add(CronJobCreate(
+                name="Processar sugestões proativas",
+                schedule=schedule_every_minutes(5),
+                action="process_suggestions",
+            ))
+            print("[scheduler] Created 'process_suggestions' job")
 
     async def start(self) -> None:
         """Inicia o scheduler."""

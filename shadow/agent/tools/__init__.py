@@ -65,6 +65,14 @@ from .list_alerts import ListAlertsTool
 from .delete_alert import DeleteAlertTool
 from .preview_summary import PreviewSummaryTool
 
+# Phase 7: Proactive Suggestions
+from .list_suggestions import ListSuggestionsTool
+from .manage_monitored_groups import ManageMonitoredGroupsTool
+
+# Phase 8: CRM Oculto
+from .conversation_summary import ConversationSummaryTool
+from .contact_history import ContactHistoryTool
+
 __all__ = [
     # Base classes
     "Tool",
@@ -115,6 +123,12 @@ __all__ = [
     "ListAlertsTool",
     "DeleteAlertTool",
     "PreviewSummaryTool",
+    # Proactive Suggestions (Phase 7)
+    "ListSuggestionsTool",
+    "ManageMonitoredGroupsTool",
+    # CRM Oculto (Phase 8)
+    "ConversationSummaryTool",
+    "ContactHistoryTool",
     # Setup function
     "setup_default_tools",
 ]
@@ -181,6 +195,14 @@ def setup_default_tools(registry: ToolRegistry | None = None) -> ToolRegistry:
     registry.register(ListAlertsTool())
     registry.register(DeleteAlertTool())
     registry.register(PreviewSummaryTool())
+
+    # Register suggestion tools (Phase 7)
+    registry.register(ListSuggestionsTool())
+    registry.register(ManageMonitoredGroupsTool())
+
+    # Register CRM Oculto tools (Phase 8)
+    registry.register(ConversationSummaryTool())
+    registry.register(ContactHistoryTool())
 
     print(f"[tools] Registered {len(registry)} default tools")
     return registry

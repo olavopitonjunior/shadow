@@ -66,3 +66,11 @@ Content-Type: application/json
 - The Shadow replies only to the configured owner phone.
 - Contacts are inferred from messages; no access to phone contacts.
 - Supports Evolution API and Z-API if configured via secrets.
+
+## Admin (local only)
+Um painel administrativo local foi adicionado para monitoramento sem expor mensagens.
+
+- API: `apps/admin-api` (FastAPI, localhost)
+- UI: `apps/admin` (React/Vite, localhost)
+
+O painel exibe apenas métricas e metadados agregados (sem conteúdo de mensagens).

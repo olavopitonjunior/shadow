@@ -110,7 +110,7 @@ class EntityExtractor:
         if api_key:
             try:
                 genai.configure(api_key=api_key)
-                self.model = genai.GenerativeModel("gemini-1.5-flash")
+                self.model = genai.GenerativeModel("gemini-2.5-flash-lite")
                 logger.info("EntityExtractor initialized with Gemini")
             except Exception as e:
                 logger.warning(f"Failed to initialize Gemini: {e}")

@@ -255,6 +255,12 @@ class SqliteStorage:
             ("last_summary_at", "TEXT"),
             ("summary_message_count", "INTEGER DEFAULT 0"),
             ("email", "TEXT"),  # Phase 1 CRM: Email for duplicate detection
+            # Phase 8: CRM Oculto - Context update fields
+            ("company", "TEXT"),
+            ("role", "TEXT"),
+            ("has_pending_appointments", "INTEGER DEFAULT 0"),
+            ("has_pending_tasks", "INTEGER DEFAULT 0"),
+            ("notes", "TEXT"),
         ]
         for col_name, col_type in migrations:
             if col_name not in existing:
@@ -326,6 +332,27 @@ class SqliteStorage:
 
         # Phase 5: Learning System
         self._migrate_learning(cur)
+
+        # Phase 7: Entity sender tracking
+        self._migrate_entities_phase7(cur)
+
+    def _migrate_entities_phase7(self, cur: sqlite3.Cursor) -> None:
+        """Add sender tracking columns to shadow_extracted_entities (migration 028)."""
+        cur.execute("PRAGMA table_info(shadow_extracted_entities)")
+        existing = {row[1] for row in cur.fetchall()}
+
+        migrations = [
+            ("sender_phone", "TEXT"),  # Real sender phone (E.164)
+            ("sender_name", "TEXT"),   # Real sender name (push name)
+        ]
+        for col_name, col_type in migrations:
+            if col_name not in existing:
+                cur.execute(f"ALTER TABLE shadow_extracted_entities ADD COLUMN {col_name} {col_type}")
+
+        # Index for efficient contact association
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_entities_sender ON shadow_extracted_entities(sender_phone)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_entities_sender_name ON shadow_extracted_entities(sender_name)")
+        self._conn.commit()
 
     def _migrate_learning(self, cur: sqlite3.Cursor) -> None:
         """Add learning system tables (feedback, patterns, preferences)."""
@@ -1415,18 +1442,33 @@ class SqliteStorage:
         entity_type: str,
         entity_data: dict[str, Any],
         confidence: float = 0.8,
+        sender_phone: str | None = None,
+        sender_name: str | None = None,
     ) -> int:
-        """Save an extracted entity and return its ID."""
+        """Save an extracted entity and return its ID.
+
+        Args:
+            owner_id: Owner's phone number
+            source_chat_id: Chat JID/LID where entity was extracted
+            source_message_id: Message ID (optional)
+            entity_type: Type of entity (task, meeting, contact, reminder)
+            entity_data: Extracted data from LLM
+            confidence: Confidence score 0-1
+            sender_phone: REAL sender phone (E.164) - not from entity_data
+            sender_name: REAL sender name (push name) - not from entity_data
+        """
         import json
         now = datetime.utcnow().isoformat()
         cur = self._conn.cursor()
         cur.execute(
             """
             INSERT INTO shadow_extracted_entities
-            (owner_id, source_chat_id, source_message_id, entity_type, entity_data, confidence, extracted_at, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (owner_id, source_chat_id, source_message_id, entity_type, entity_data,
+             confidence, sender_phone, sender_name, extracted_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (owner_id, source_chat_id, source_message_id, entity_type, json.dumps(entity_data), confidence, now, now),
+            (owner_id, source_chat_id, source_message_id, entity_type,
+             json.dumps(entity_data), confidence, sender_phone, sender_name, now, now),
         )
         self._conn.commit()
         return cur.lastrowid
@@ -1492,6 +1534,83 @@ class SqliteStorage:
             return None
         row = cur.fetchone()
         return dict(row) if row else None
+
+    def update_contact_context_fields(
+        self,
+        owner_id: str,
+        contact_phone: str,
+        fields: dict[str, Any],
+    ) -> bool:
+        """
+        Update specific fields in contact context.
+
+        Phase 8F: CRM Oculto - Context update contínuo.
+        Updates specific fields without resetting counters.
+
+        Args:
+            owner_id: Owner phone E.164
+            contact_phone: Contact phone
+            fields: Dict of fields to update (topics, email, company, etc)
+
+        Returns:
+            True if updated successfully
+        """
+        if not fields:
+            return False
+
+        now = datetime.utcnow().isoformat()
+        cur = self._conn.cursor()
+
+        # Check if context exists
+        cur.execute(
+            "SELECT id FROM shadow_contact_context WHERE owner_id = ? AND contact_phone = ?",
+            (owner_id, contact_phone),
+        )
+        row = cur.fetchone()
+        if not row:
+            return False
+
+        # Build update query dynamically
+        # Only allow specific safe fields
+        safe_fields = {
+            "topics", "summary", "sentiment", "email", "company",
+            "role", "has_pending_tasks", "has_pending_appointments",
+            "relationship_type", "notes"
+        }
+
+        updates = []
+        values = []
+        for key, value in fields.items():
+            if key in safe_fields:
+                # Convert lists/dicts to JSON
+                if isinstance(value, (list, dict)):
+                    import json
+                    value = json.dumps(value)
+                elif isinstance(value, bool):
+                    value = 1 if value else 0
+
+                updates.append(f"{key} = ?")
+                values.append(value)
+
+        if not updates:
+            return False
+
+        # Add updated_at
+        updates.append("updated_at = ?")
+        values.append(now)
+
+        # Add WHERE clause values
+        values.extend([owner_id, contact_phone])
+
+        query = f"""
+            UPDATE shadow_contact_context
+            SET {', '.join(updates)}
+            WHERE owner_id = ? AND contact_phone = ?
+        """
+
+        cur.execute(query, values)
+        self._conn.commit()
+        return cur.rowcount > 0
 
     def list_tasks_for_contact(
         self,
@@ -2228,6 +2347,369 @@ class SqliteStorage:
             (owner_id, limit),
         )
         return [dict(row) for row in cur.fetchall()]
+
+    # ========== Phase 7: Proactive Suggestions ==========
+
+    def _ensure_suggestions_schema(self) -> None:
+        """Ensure suggestions tables exist (called during init)."""
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS shadow_suggestions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_id TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                source_id INTEGER,
+                source_chat_id TEXT,
+                source_message_id TEXT,
+                suggestion_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                body TEXT,
+                suggestion_data TEXT,
+                confidence REAL DEFAULT 0.5,
+                priority INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'pending',
+                batch_id TEXT,
+                send_after TEXT,
+                expires_at TEXT,
+                sent_at TEXT,
+                resolved_at TEXT,
+                response_message_id TEXT,
+                response_text TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_suggestions_owner_status ON shadow_suggestions(owner_id, status)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_suggestions_pending ON shadow_suggestions(status, send_after, priority DESC)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS shadow_suggestion_daily_counts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_id TEXT NOT NULL,
+                date TEXT NOT NULL,
+                sent_count INTEGER DEFAULT 0,
+                accepted_count INTEGER DEFAULT 0,
+                rejected_count INTEGER DEFAULT 0,
+                created_at TEXT,
+                UNIQUE(owner_id, date)
+            )
+            """
+        )
+        self._conn.commit()
+
+    def create_suggestion(
+        self,
+        owner_id: str,
+        source_type: str,
+        source_id: int | None,
+        suggestion_type: str,
+        title: str,
+        body: str | None,
+        suggestion_data: dict[str, Any],
+        confidence: float,
+        priority: int = 0,
+        source_chat_id: str | None = None,
+        source_message_id: str | None = None,
+        send_after: str | None = None,
+        expires_at: str | None = None,
+    ) -> int:
+        """Create a new suggestion and return its ID."""
+        import json
+        self._ensure_suggestions_schema()
+        now = datetime.utcnow().isoformat()
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO shadow_suggestions
+            (owner_id, source_type, source_id, source_chat_id, source_message_id,
+             suggestion_type, title, body, suggestion_data, confidence, priority,
+             status, send_after, expires_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+            """,
+            (owner_id, source_type, source_id, source_chat_id, source_message_id,
+             suggestion_type, title, body, json.dumps(suggestion_data), confidence, priority,
+             send_after, expires_at, now, now),
+        )
+        self._conn.commit()
+        return cur.lastrowid
+
+    def get_suggestion(self, suggestion_id: int) -> dict[str, Any] | None:
+        """Get a suggestion by ID."""
+        self._ensure_suggestions_schema()
+        cur = self._conn.cursor()
+        cur.execute("SELECT * FROM shadow_suggestions WHERE id = ?", (suggestion_id,))
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def get_pending_suggestions(
+        self,
+        owner_id: str,
+        limit: int = 10,
+        min_priority: int = 0,
+        status: str = "pending",
+    ) -> list[dict[str, Any]]:
+        """Get pending suggestions ready to send."""
+        self._ensure_suggestions_schema()
+        now = datetime.utcnow().isoformat()
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT * FROM shadow_suggestions
+            WHERE owner_id = ? AND status = ? AND priority >= ?
+            AND (send_after IS NULL OR send_after <= ?)
+            AND (expires_at IS NULL OR expires_at > ?)
+            ORDER BY priority DESC, created_at ASC
+            LIMIT ?
+            """,
+            (owner_id, status, min_priority, now, now, limit),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def get_sent_suggestions(
+        self,
+        owner_id: str,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Get suggestions that were sent and await response."""
+        self._ensure_suggestions_schema()
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT * FROM shadow_suggestions
+            WHERE owner_id = ? AND status = 'sent'
+            ORDER BY sent_at DESC
+            LIMIT ?
+            """,
+            (owner_id, limit),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def update_suggestion_status(
+        self,
+        suggestion_id: int,
+        status: str,
+        response_text: str | None = None,
+        response_message_id: str | None = None,
+    ) -> bool:
+        """Update suggestion status."""
+        self._ensure_suggestions_schema()
+        now = datetime.utcnow().isoformat()
+        cur = self._conn.cursor()
+
+        resolved_at = now if status in ("accepted", "rejected", "expired") else None
+
+        cur.execute(
+            """
+            UPDATE shadow_suggestions
+            SET status = ?, response_text = ?, response_message_id = ?,
+                resolved_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (status, response_text, response_message_id, resolved_at, now, suggestion_id),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def mark_suggestion_sent(self, suggestion_id: int) -> bool:
+        """Mark a suggestion as sent."""
+        self._ensure_suggestions_schema()
+        now = datetime.utcnow().isoformat()
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE shadow_suggestions
+            SET status = 'sent', sent_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (now, now, suggestion_id),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def mark_entity_processed(self, entity_id: int, processed: bool = True) -> bool:
+        """Mark an extracted entity as processed."""
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE shadow_extracted_entities
+            SET processed = ?
+            WHERE id = ?
+            """,
+            (1 if processed else 0, entity_id),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def get_unprocessed_entities(
+        self,
+        owner_id: str,
+        entity_type: str | None = None,
+        min_confidence: float = 0.5,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Get unprocessed entities for suggestion creation."""
+        import json
+        cur = self._conn.cursor()
+        if entity_type:
+            cur.execute(
+                """
+                SELECT * FROM shadow_extracted_entities
+                WHERE owner_id = ? AND entity_type = ? AND processed = 0 AND confidence >= ?
+                ORDER BY confidence DESC, extracted_at DESC
+                LIMIT ?
+                """,
+                (owner_id, entity_type, min_confidence, limit),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT * FROM shadow_extracted_entities
+                WHERE owner_id = ? AND processed = 0 AND confidence >= ?
+                ORDER BY confidence DESC, extracted_at DESC
+                LIMIT ?
+                """,
+                (owner_id, min_confidence, limit),
+            )
+        rows = cur.fetchall()
+        results = []
+        for row in rows:
+            d = dict(row)
+            if d.get("entity_data"):
+                try:
+                    d["entity_data"] = json.loads(d["entity_data"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            results.append(d)
+        return results
+
+    def get_suggestion_daily_count(self, owner_id: str, date: str | None = None) -> dict[str, Any]:
+        """Get daily suggestion count for rate limiting."""
+        self._ensure_suggestions_schema()
+        if date is None:
+            date = datetime.utcnow().strftime("%Y-%m-%d")
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT * FROM shadow_suggestion_daily_counts
+            WHERE owner_id = ? AND date = ?
+            """,
+            (owner_id, date),
+        )
+        row = cur.fetchone()
+        if row:
+            return dict(row)
+        return {"owner_id": owner_id, "date": date, "sent_count": 0, "accepted_count": 0, "rejected_count": 0}
+
+    def increment_suggestion_count(
+        self,
+        owner_id: str,
+        count_type: str = "sent",
+        date: str | None = None,
+    ) -> None:
+        """Increment daily suggestion count (sent/accepted/rejected)."""
+        self._ensure_suggestions_schema()
+        if date is None:
+            date = datetime.utcnow().strftime("%Y-%m-%d")
+        now = datetime.utcnow().isoformat()
+        cur = self._conn.cursor()
+
+        # Upsert pattern
+        cur.execute(
+            """
+            INSERT INTO shadow_suggestion_daily_counts (owner_id, date, sent_count, accepted_count, rejected_count, created_at)
+            VALUES (?, ?, 0, 0, 0, ?)
+            ON CONFLICT(owner_id, date) DO NOTHING
+            """,
+            (owner_id, date, now),
+        )
+
+        column = f"{count_type}_count"
+        if column not in ("sent_count", "accepted_count", "rejected_count"):
+            column = "sent_count"
+
+        cur.execute(
+            f"""
+            UPDATE shadow_suggestion_daily_counts
+            SET {column} = {column} + 1
+            WHERE owner_id = ? AND date = ?
+            """,
+            (owner_id, date),
+        )
+        self._conn.commit()
+
+    def expire_old_suggestions(self, owner_id: str | None = None) -> int:
+        """Expire suggestions past their expiry time. Returns count expired."""
+        self._ensure_suggestions_schema()
+        now = datetime.utcnow().isoformat()
+        cur = self._conn.cursor()
+        if owner_id:
+            cur.execute(
+                """
+                UPDATE shadow_suggestions
+                SET status = 'expired', resolved_at = ?, updated_at = ?
+                WHERE owner_id = ? AND status IN ('pending', 'sent')
+                AND expires_at IS NOT NULL AND expires_at < ?
+                """,
+                (now, now, owner_id, now),
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE shadow_suggestions
+                SET status = 'expired', resolved_at = ?, updated_at = ?
+                WHERE status IN ('pending', 'sent')
+                AND expires_at IS NOT NULL AND expires_at < ?
+                """,
+                (now, now, now),
+            )
+        self._conn.commit()
+        return cur.rowcount
+
+    def get_monitored_groups(self, owner_id: str) -> list[str]:
+        """Get list of monitored group JIDs for this owner."""
+        settings = self.get_user_settings(owner_id)
+        monitored = settings.get("monitored_groups", [])
+        if isinstance(monitored, str):
+            import json
+            try:
+                monitored = json.loads(monitored)
+            except (json.JSONDecodeError, TypeError):
+                monitored = []
+        return monitored
+
+    def add_monitored_group(self, owner_id: str, group_jid: str) -> bool:
+        """Add a group to monitored list."""
+        import json
+        settings = self.get_user_settings(owner_id)
+        monitored = settings.get("monitored_groups", [])
+        if isinstance(monitored, str):
+            try:
+                monitored = json.loads(monitored)
+            except (json.JSONDecodeError, TypeError):
+                monitored = []
+        if group_jid not in monitored:
+            monitored.append(group_jid)
+            self.update_user_settings(owner_id, {"monitored_groups": json.dumps(monitored)})
+            return True
+        return False
+
+    def remove_monitored_group(self, owner_id: str, group_jid: str) -> bool:
+        """Remove a group from monitored list."""
+        import json
+        settings = self.get_user_settings(owner_id)
+        monitored = settings.get("monitored_groups", [])
+        if isinstance(monitored, str):
+            try:
+                monitored = json.loads(monitored)
+            except (json.JSONDecodeError, TypeError):
+                monitored = []
+        if group_jid in monitored:
+            monitored.remove(group_jid)
+            self.update_user_settings(owner_id, {"monitored_groups": json.dumps(monitored)})
+            return True
+        return False
 
 
 class SupabaseStorage:
@@ -3039,8 +3521,21 @@ class SupabaseStorage:
         entity_type: str,
         entity_data: dict[str, Any],
         confidence: float = 0.8,
+        sender_phone: str | None = None,
+        sender_name: str | None = None,
     ) -> str:
-        """Save an extracted entity and return its ID."""
+        """Save an extracted entity and return its ID.
+
+        Args:
+            owner_id: Owner's phone number
+            source_chat_id: Chat JID/LID where entity was extracted
+            source_message_id: Message ID (optional)
+            entity_type: Type of entity (task, meeting, contact, reminder)
+            entity_data: Extracted data from LLM
+            confidence: Confidence score 0-1
+            sender_phone: REAL sender phone (E.164) - not from entity_data
+            sender_name: REAL sender name (push name) - not from entity_data
+        """
         payload = {
             "owner_id": owner_id,
             "source_chat_id": source_chat_id,
@@ -3048,6 +3543,8 @@ class SupabaseStorage:
             "entity_type": entity_type,
             "entity_data": entity_data,
             "confidence": confidence,
+            "sender_phone": sender_phone,
+            "sender_name": sender_name,
         }
         data = self.client.table("shadow_extracted_entities").insert(payload).execute().data
         return data[0]["id"] if data else None
@@ -3779,6 +4276,264 @@ class SupabaseStorage:
             .execute()
         )
         return res.data or []
+
+    # ========== Phase 7: Proactive Suggestions ==========
+
+    def create_suggestion(
+        self,
+        owner_id: str,
+        source_type: str,
+        source_id: int | None,
+        suggestion_type: str,
+        title: str,
+        body: str | None,
+        suggestion_data: dict[str, Any],
+        confidence: float,
+        priority: int = 0,
+        source_chat_id: str | None = None,
+        source_message_id: str | None = None,
+        send_after: str | None = None,
+        expires_at: str | None = None,
+    ) -> str:
+        """Create a new suggestion and return its ID."""
+        payload = {
+            "owner_id": owner_id,
+            "source_type": source_type,
+            "source_id": source_id,
+            "source_chat_id": source_chat_id,
+            "source_message_id": source_message_id,
+            "suggestion_type": suggestion_type,
+            "title": title,
+            "body": body,
+            "suggestion_data": suggestion_data,
+            "confidence": confidence,
+            "priority": priority,
+            "status": "pending",
+            "send_after": send_after,
+            "expires_at": expires_at,
+        }
+        data = self.client.table("shadow_suggestions").insert(payload).execute().data
+        return data[0]["id"] if data else None
+
+    def get_suggestion(self, suggestion_id: str) -> dict[str, Any] | None:
+        """Get a suggestion by ID."""
+        res = self.client.table("shadow_suggestions").select("*").eq("id", suggestion_id).execute()
+        return res.data[0] if res.data else None
+
+    def get_pending_suggestions(
+        self,
+        owner_id: str,
+        limit: int = 10,
+        min_priority: int = 0,
+        status: str = "pending",
+    ) -> list[dict[str, Any]]:
+        """Get pending suggestions ready to send."""
+        now = datetime.utcnow().isoformat()
+        query = (
+            self.client.table("shadow_suggestions")
+            .select("*")
+            .eq("owner_id", owner_id)
+            .eq("status", status)
+            .gte("priority", min_priority)
+        )
+        # Supabase doesn't have easy OR for null checks, so we do post-filter
+        res = query.order("priority", desc=True).order("created_at").limit(limit * 2).execute()
+        results = []
+        for row in res.data or []:
+            send_after = row.get("send_after")
+            expires_at = row.get("expires_at")
+            if send_after and send_after > now:
+                continue
+            if expires_at and expires_at < now:
+                continue
+            results.append(row)
+            if len(results) >= limit:
+                break
+        return results
+
+    def get_sent_suggestions(
+        self,
+        owner_id: str,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Get suggestions that were sent and await response."""
+        res = (
+            self.client.table("shadow_suggestions")
+            .select("*")
+            .eq("owner_id", owner_id)
+            .eq("status", "sent")
+            .order("sent_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return res.data or []
+
+    def update_suggestion_status(
+        self,
+        suggestion_id: str,
+        status: str,
+        response_text: str | None = None,
+        response_message_id: str | None = None,
+    ) -> bool:
+        """Update suggestion status."""
+        now = datetime.utcnow().isoformat()
+        payload = {
+            "status": status,
+            "response_text": response_text,
+            "response_message_id": response_message_id,
+            "updated_at": now,
+        }
+        if status in ("accepted", "rejected", "expired"):
+            payload["resolved_at"] = now
+        res = self.client.table("shadow_suggestions").update(payload).eq("id", suggestion_id).execute()
+        return len(res.data or []) > 0
+
+    def mark_suggestion_sent(self, suggestion_id: str) -> bool:
+        """Mark a suggestion as sent."""
+        now = datetime.utcnow().isoformat()
+        res = (
+            self.client.table("shadow_suggestions")
+            .update({"status": "sent", "sent_at": now, "updated_at": now})
+            .eq("id", suggestion_id)
+            .execute()
+        )
+        return len(res.data or []) > 0
+
+    def mark_entity_processed(self, entity_id: str, processed: bool = True) -> bool:
+        """Mark an extracted entity as processed."""
+        res = (
+            self.client.table("shadow_extracted_entities")
+            .update({"processed": processed})
+            .eq("id", entity_id)
+            .execute()
+        )
+        return len(res.data or []) > 0
+
+    def get_unprocessed_entities(
+        self,
+        owner_id: str,
+        entity_type: str | None = None,
+        min_confidence: float = 0.5,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Get unprocessed entities for suggestion creation."""
+        query = (
+            self.client.table("shadow_extracted_entities")
+            .select("*")
+            .eq("owner_id", owner_id)
+            .eq("processed", False)
+            .gte("confidence", min_confidence)
+        )
+        if entity_type:
+            query = query.eq("entity_type", entity_type)
+        res = query.order("confidence", desc=True).order("extracted_at", desc=True).limit(limit).execute()
+        return res.data or []
+
+    def get_suggestion_daily_count(self, owner_id: str, date: str | None = None) -> dict[str, Any]:
+        """Get daily suggestion count for rate limiting."""
+        if date is None:
+            date = datetime.utcnow().strftime("%Y-%m-%d")
+        res = (
+            self.client.table("shadow_suggestion_daily_counts")
+            .select("*")
+            .eq("owner_id", owner_id)
+            .eq("date", date)
+            .execute()
+        )
+        if res.data:
+            return res.data[0]
+        return {"owner_id": owner_id, "date": date, "sent_count": 0, "accepted_count": 0, "rejected_count": 0}
+
+    def increment_suggestion_count(
+        self,
+        owner_id: str,
+        count_type: str = "sent",
+        date: str | None = None,
+    ) -> None:
+        """Increment daily suggestion count (sent/accepted/rejected)."""
+        if date is None:
+            date = datetime.utcnow().strftime("%Y-%m-%d")
+
+        column = f"{count_type}_count"
+        if column not in ("sent_count", "accepted_count", "rejected_count"):
+            column = "sent_count"
+
+        # Check if exists
+        existing = self.get_suggestion_daily_count(owner_id, date)
+        if existing.get("id"):
+            # Update
+            self.client.rpc(
+                "increment_field",
+                {"table_name": "shadow_suggestion_daily_counts", "field": column, "row_id": existing["id"]}
+            ).execute()
+        else:
+            # Insert
+            payload = {
+                "owner_id": owner_id,
+                "date": date,
+                "sent_count": 1 if column == "sent_count" else 0,
+                "accepted_count": 1 if column == "accepted_count" else 0,
+                "rejected_count": 1 if column == "rejected_count" else 0,
+            }
+            self.client.table("shadow_suggestion_daily_counts").insert(payload).execute()
+
+    def expire_old_suggestions(self, owner_id: str | None = None) -> int:
+        """Expire suggestions past their expiry time. Returns count expired."""
+        now = datetime.utcnow().isoformat()
+        query = (
+            self.client.table("shadow_suggestions")
+            .update({"status": "expired", "resolved_at": now, "updated_at": now})
+            .in_("status", ["pending", "sent"])
+            .lt("expires_at", now)
+        )
+        if owner_id:
+            query = query.eq("owner_id", owner_id)
+        res = query.execute()
+        return len(res.data or [])
+
+    def get_monitored_groups(self, owner_id: str) -> list[str]:
+        """Get list of monitored group JIDs for this owner."""
+        settings = self.get_user_settings(owner_id)
+        monitored = settings.get("monitored_groups", [])
+        if isinstance(monitored, str):
+            import json
+            try:
+                monitored = json.loads(monitored)
+            except (json.JSONDecodeError, TypeError):
+                monitored = []
+        return monitored
+
+    def add_monitored_group(self, owner_id: str, group_jid: str) -> bool:
+        """Add a group to monitored list."""
+        import json
+        settings = self.get_user_settings(owner_id)
+        monitored = settings.get("monitored_groups", [])
+        if isinstance(monitored, str):
+            try:
+                monitored = json.loads(monitored)
+            except (json.JSONDecodeError, TypeError):
+                monitored = []
+        if group_jid not in monitored:
+            monitored.append(group_jid)
+            self.update_user_settings(owner_id, {"monitored_groups": json.dumps(monitored)})
+            return True
+        return False
+
+    def remove_monitored_group(self, owner_id: str, group_jid: str) -> bool:
+        """Remove a group from monitored list."""
+        import json
+        settings = self.get_user_settings(owner_id)
+        monitored = settings.get("monitored_groups", [])
+        if isinstance(monitored, str):
+            try:
+                monitored = json.loads(monitored)
+            except (json.JSONDecodeError, TypeError):
+                monitored = []
+        if group_jid in monitored:
+            monitored.remove(group_jid)
+            self.update_user_settings(owner_id, {"monitored_groups": json.dumps(monitored)})
+            return True
+        return False
 
 
 class Storage:
