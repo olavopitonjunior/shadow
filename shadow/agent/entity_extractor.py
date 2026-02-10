@@ -168,6 +168,8 @@ class EntityExtractor:
             recent_context=recent_context,
         )
 
+        import time as _time
+        _t0 = _time.monotonic()
         response = self.model.generate_content(
             prompt,
             generation_config=genai.GenerationConfig(
@@ -175,6 +177,22 @@ class EntityExtractor:
                 max_output_tokens=1024,
             ),
         )
+        _latency = int((_time.monotonic() - _t0) * 1000)
+
+        # Track Gemini usage
+        try:
+            from usage_tracker import get_tracker, UsageRecord
+            meta = getattr(response, "usage_metadata", None)
+            get_tracker().record(UsageRecord(
+                provider="google",
+                model=getattr(self.model, "model_name", "gemini-2.5-flash-lite"),
+                input_tokens=getattr(meta, "prompt_token_count", 0) if meta else 0,
+                output_tokens=getattr(meta, "candidates_token_count", 0) if meta else 0,
+                operation="entity_extraction",
+                latency_ms=_latency,
+            ))
+        except Exception:
+            pass
 
         return self._parse_llm_response(response.text, message)
 

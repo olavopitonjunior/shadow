@@ -137,11 +137,30 @@ class ContactMemory:
 
     def _embed(self, text: str) -> list[float]:
         """Generate embedding vector for text."""
+        import time as _time
         client = self._get_openai()
+        _t0 = _time.monotonic()
         response = client.embeddings.create(
             model=self.embedding_model,
             input=text,
         )
+        _latency = int((_time.monotonic() - _t0) * 1000)
+
+        # Track OpenAI usage
+        try:
+            from usage_tracker import get_tracker, UsageRecord
+            usage = getattr(response, "usage", None)
+            get_tracker().record(UsageRecord(
+                provider="openai",
+                model=self.embedding_model,
+                input_tokens=getattr(usage, "prompt_tokens", 0) if usage else 0,
+                output_tokens=0,
+                operation="embedding",
+                latency_ms=_latency,
+            ))
+        except Exception:
+            pass
+
         return response.data[0].embedding
 
     def store(

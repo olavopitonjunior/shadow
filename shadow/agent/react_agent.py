@@ -8,6 +8,7 @@ Same architecture as OpenClaw/Claude Code for high-quality reasoning.
 """
 
 import os
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -24,6 +25,7 @@ import anthropic
 from tools import ToolRegistry, ToolContext, get_tool_registry, setup_default_tools
 from tool_adapter import to_claude_tools, format_tool_result
 from agent_config import AgentConfig, SYSTEM_PROMPT
+from prompt_builder import get_prompt_builder
 from sessions import get_session_store
 
 # Ensure tools are registered at import time
@@ -117,6 +119,74 @@ class ReActAgent:
         print(f"[react_agent] Initialized with {self.config.model}")
         print(f"[react_agent] Tools available: {len(self.tools)}")
 
+    def _build_dynamic_prompt(self, context: ToolContext) -> str:
+        """
+        Build a dynamic system prompt using PromptBuilder with user data.
+
+        Falls back to the static SYSTEM_PROMPT if data cannot be loaded.
+        """
+        if not context.storage or not context.user_phone:
+            return SYSTEM_PROMPT
+
+        try:
+            storage = context.storage
+            owner_id = context.user_phone
+
+            # Fetch user settings
+            settings = storage.get_user_settings(owner_id)
+
+            # Fetch learned patterns and convert to summary format
+            learned_patterns: dict[str, Any] = {}
+            try:
+                preferences = storage.get_learned_preferences(owner_id)
+                for pref in preferences:
+                    key = pref.get("preference_key", "")
+                    value = pref.get("preference_value", "")
+                    if "time" in key or "horário" in key.lower():
+                        learned_patterns["time_preferences"] = value
+                    elif "categor" in key.lower():
+                        learned_patterns["top_categories"] = value
+                    elif "contact" in key.lower() or "contato" in key.lower():
+                        learned_patterns["frequent_contacts"] = value
+                    elif "style" in key.lower() or "estilo" in key.lower():
+                        learned_patterns["communication_style"] = value
+            except Exception as e:
+                print(f"[react_agent] Could not load preferences: {e}")
+
+            # Fetch recent corrections (patterns with high confidence)
+            recent_corrections: list[dict] = []
+            try:
+                patterns = storage.get_learned_patterns(owner_id, min_confidence=0.5)
+                recent_corrections = patterns[:5]
+            except Exception as e:
+                print(f"[react_agent] Could not load patterns: {e}")
+
+            # Fetch important memories (high importance, no specific contact)
+            important_memories: list[str] = []
+            try:
+                memories = storage.list_contact_memories(owner_id, limit=10)
+                important_memories = [
+                    m.get("text", "") for m in memories
+                    if m.get("importance", 0) >= 0.7 and m.get("text")
+                ][:10]
+            except Exception as e:
+                print(f"[react_agent] Could not load memories: {e}")
+
+            builder = get_prompt_builder()
+            prompt = builder.build_system_prompt(
+                settings=settings,
+                learned_patterns=learned_patterns if learned_patterns else None,
+                recent_corrections=recent_corrections if recent_corrections else None,
+                important_memories=important_memories if important_memories else None,
+            )
+
+            print(f"[react_agent] Built dynamic prompt ({len(prompt)} chars)")
+            return prompt
+
+        except Exception as e:
+            print(f"[react_agent] Failed to build dynamic prompt, using static: {e}")
+            return SYSTEM_PROMPT
+
     def run(self, message: str, context: ToolContext) -> AgentState:
         """
         Execute the ReAct loop for a user message.
@@ -132,6 +202,9 @@ class ReActAgent:
             session_id=context.session_id or "",
             message=message,
         )
+
+        # Build dynamic system prompt with user preferences and learned patterns
+        system_prompt = self._build_dynamic_prompt(context)
 
         # Retrieve conversation history from session for context continuity
         history: list[dict[str, Any]] = []
@@ -162,17 +235,34 @@ class ReActAgent:
 
             try:
                 # Call Claude
+                _t0 = time.monotonic()
                 response = self.client.messages.create(
                     model=self.config.model,
                     max_tokens=self.config.max_tokens,
-                    system=SYSTEM_PROMPT,
+                    system=system_prompt,
                     tools=self.tools,
                     messages=messages,
                 )
+                _latency = int((time.monotonic() - _t0) * 1000)
 
                 # Track token usage
                 state.total_input_tokens += response.usage.input_tokens
                 state.total_output_tokens += response.usage.output_tokens
+
+                # Record API usage for cost tracking
+                try:
+                    from usage_tracker import get_tracker, UsageRecord
+                    get_tracker().record(UsageRecord(
+                        provider="anthropic",
+                        model=self.config.model,
+                        input_tokens=response.usage.input_tokens,
+                        output_tokens=response.usage.output_tokens,
+                        operation="chat",
+                        session_id=getattr(context, "session_id", ""),
+                        latency_ms=_latency,
+                    ))
+                except Exception:
+                    pass
 
                 # Process response
                 tool_calls = []

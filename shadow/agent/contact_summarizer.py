@@ -139,11 +139,29 @@ class ContactSummarizer:
         )
 
         try:
+            import time as _time
             client = self._get_client()
+            _t0 = _time.monotonic()
             response = await asyncio.to_thread(
                 client.generate_content,
                 prompt,
             )
+            _latency = int((_time.monotonic() - _t0) * 1000)
+
+            # Track Gemini usage
+            try:
+                from usage_tracker import get_tracker, UsageRecord
+                meta = getattr(response, "usage_metadata", None)
+                get_tracker().record(UsageRecord(
+                    provider="google",
+                    model=getattr(client, "model_name", "gemini-2.5-flash-lite"),
+                    input_tokens=getattr(meta, "prompt_token_count", 0) if meta else 0,
+                    output_tokens=getattr(meta, "candidates_token_count", 0) if meta else 0,
+                    operation="summarization",
+                    latency_ms=_latency,
+                ))
+            except Exception:
+                pass
 
             # Parse JSON response
             text = response.text.strip()
