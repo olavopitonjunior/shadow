@@ -66,3 +66,18 @@ shadow/logs/
 
 # MCP config (may contain tokens)
 .mcp.json
+
+# User data / temp files
+files/
+files.zip
+data/
+
+# Claude Code project configs
+.claude/agents/
+.claude/context/
+
+# Unrelated projects in workspace
+moltbot/
+moltbot_repo/
+Baileys_repo/
+nul

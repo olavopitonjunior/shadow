@@ -8,8 +8,9 @@
     "node": ">=18"
   },
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "node src/index.js"
+    "start": "node src/index-multi.js",
+    "start:single": "node src/index.js",
+    "dev": "node src/index-multi.js"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.21",

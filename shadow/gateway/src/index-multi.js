@@ -251,6 +251,29 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // GET /sessions/:userId/groups
+    if (req.method === "GET" && action === "groups") {
+      const session = manager.sessions.get(userId);
+      if (!session || session.status !== SESSION_STATUS.CONNECTED) {
+        jsonResponse(res, { groups: [], error: "Not connected" });
+        return;
+      }
+      try {
+        const participating = await session.sock.groupFetchAllParticipating();
+        const groups = Object.values(participating).map((g) => ({
+          id: g.id,
+          subject: g.subject,
+          size: g.size || g.participants?.length || 0,
+          creation: g.creation,
+          owner: g.owner,
+        }));
+        jsonResponse(res, { groups });
+      } catch (err) {
+        jsonResponse(res, { groups: [], error: String(err) });
+      }
+      return;
+    }
+
     // DELETE /sessions/:userId
     if (req.method === "DELETE" && !action) {
       const result = await manager.disconnect(userId);

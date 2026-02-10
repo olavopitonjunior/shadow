@@ -17,11 +17,11 @@
       "enabled": true,
       "delete_after_run": false,
       "created_at_ms": 1770325432501,
-      "updated_at_ms": 1770429117495,
+      "updated_at_ms": 1770753149910,
       "state": {
-        "next_run_at_ms": 1770429177495,
+        "next_run_at_ms": 1770753209910,
         "running_at_ms": null,
-        "last_run_at_ms": 1770429117493,
+        "last_run_at_ms": 1770753149908,
         "last_status": "ok",
         "last_error": null,
         "last_duration_ms": 2
@@ -43,14 +43,14 @@
       "enabled": true,
       "delete_after_run": false,
       "created_at_ms": 1770325432502,
-      "updated_at_ms": 1770379216394,
+      "updated_at_ms": 1770726711755,
       "state": {
-        "next_run_at_ms": 1770465600000,
+        "next_run_at_ms": 1770811200000,
         "running_at_ms": null,
-        "last_run_at_ms": 1770379216124,
+        "last_run_at_ms": 1770726711020,
         "last_status": "ok",
         "last_error": null,
-        "last_duration_ms": 267
+        "last_duration_ms": 685
       }
     },
     {
@@ -69,11 +69,11 @@
       "enabled": true,
       "delete_after_run": false,
       "created_at_ms": 1770325432516,
-      "updated_at_ms": 1770429117499,
+      "updated_at_ms": 1770753149914,
       "state": {
-        "next_run_at_ms": 1770429177499,
+        "next_run_at_ms": 1770753209914,
         "running_at_ms": null,
-        "last_run_at_ms": 1770429117497,
+        "last_run_at_ms": 1770753149912,
         "last_status": "ok",
         "last_error": null,
         "last_duration_ms": 2
@@ -95,14 +95,14 @@
       "enabled": true,
       "delete_after_run": false,
       "created_at_ms": 1770409235983,
-      "updated_at_ms": 1770429057469,
+      "updated_at_ms": 1770753089877,
       "state": {
-        "next_run_at_ms": 1770429357469,
+        "next_run_at_ms": 1770753389877,
         "running_at_ms": null,
-        "last_run_at_ms": 1770429055203,
+        "last_run_at_ms": 1770753089874,
         "last_status": "ok",
         "last_error": null,
-        "last_duration_ms": 2266
+        "last_duration_ms": 3
       }
     }
   ]
