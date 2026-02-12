@@ -17,14 +17,14 @@
       "enabled": true,
       "delete_after_run": false,
       "created_at_ms": 1770325432501,
-      "updated_at_ms": 1770753149910,
+      "updated_at_ms": 1770927547866,
       "state": {
-        "next_run_at_ms": 1770753209910,
+        "next_run_at_ms": 1770927607866,
         "running_at_ms": null,
-        "last_run_at_ms": 1770753149908,
+        "last_run_at_ms": 1770927547865,
         "last_status": "ok",
         "last_error": null,
-        "last_duration_ms": 2
+        "last_duration_ms": 1
       }
     },
     {
@@ -43,14 +43,14 @@
       "enabled": true,
       "delete_after_run": false,
       "created_at_ms": 1770325432502,
-      "updated_at_ms": 1770726711755,
+      "updated_at_ms": 1770899019551,
       "state": {
-        "next_run_at_ms": 1770811200000,
+        "next_run_at_ms": 1770984000000,
         "running_at_ms": null,
-        "last_run_at_ms": 1770726711020,
+        "last_run_at_ms": 1770899018977,
         "last_status": "ok",
         "last_error": null,
-        "last_duration_ms": 685
+        "last_duration_ms": 569
       }
     },
     {
@@ -69,11 +69,11 @@
       "enabled": true,
       "delete_after_run": false,
       "created_at_ms": 1770325432516,
-      "updated_at_ms": 1770753149914,
+      "updated_at_ms": 1770927547870,
       "state": {
-        "next_run_at_ms": 1770753209914,
+        "next_run_at_ms": 1770927607870,
         "running_at_ms": null,
-        "last_run_at_ms": 1770753149912,
+        "last_run_at_ms": 1770927547868,
         "last_status": "ok",
         "last_error": null,
         "last_duration_ms": 2
@@ -95,14 +95,14 @@
       "enabled": true,
       "delete_after_run": false,
       "created_at_ms": 1770409235983,
-      "updated_at_ms": 1770753089877,
+      "updated_at_ms": 1770927457842,
       "state": {
-        "next_run_at_ms": 1770753389877,
+        "next_run_at_ms": 1770927757842,
         "running_at_ms": null,
-        "last_run_at_ms": 1770753089874,
+        "last_run_at_ms": 1770927457183,
         "last_status": "ok",
         "last_error": null,
-        "last_duration_ms": 3
+        "last_duration_ms": 659
       }
     }
   ]

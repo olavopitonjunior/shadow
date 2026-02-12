@@ -538,16 +538,43 @@ TODAY_TASKS_PATTERNS = [
 
 
 def _parse_datetime(text: str) -> str | None:
+    """Parse date/time from text, including mixed text with non-date words."""
     if not text:
         return None
-    dt = dateparser.parse(
-        text,
-        languages=["pt"],
-        settings={"PREFER_DATES_FROM": "future", "RETURN_AS_TIMEZONE_AWARE": False},
+
+    _dp_settings = {"PREFER_DATES_FROM": "future", "RETURN_AS_TIMEZONE_AWARE": False}
+
+    # 1) Try full text first
+    dt = dateparser.parse(text, languages=["pt"], settings=_dp_settings)
+    if dt:
+        return dt.isoformat()
+
+    # 2) Extract date fragments from mixed text using known Portuguese patterns
+    lower = text.lower()
+    date_keywords = re.findall(
+        r"(?:hoje|amanh[aã]|depois de amanh[aã]|"
+        r"pr[oó]xim[oa]\s+\w+|"
+        r"segunda|ter[cç]a|quarta|quinta|sexta|s[aá]bado|domingo|"
+        r"em\s+\d+\s+(?:minutos?|horas?|dias?|semanas?)|"
+        r"\d{1,2}/\d{1,2}(?:/\d{2,4})?)",
+        lower,
     )
-    if not dt:
-        return None
-    return dt.isoformat()
+    if date_keywords:
+        date_str = " ".join(date_keywords)
+        dt = dateparser.parse(date_str, languages=["pt"], settings=_dp_settings)
+        if dt:
+            # Extract explicit time (e.g. "14h", "às 15h", "10:30", "às 10")
+            time_match = re.search(r"(?:[àa]s?\s+)(\d{1,2})\s*[h:]?\s*(\d{0,2})", lower)
+            if not time_match:
+                time_match = re.search(r"(\d{1,2})\s*[h:]\s*(\d{0,2})", lower)
+            if time_match:
+                hour = int(time_match.group(1))
+                minute = int(time_match.group(2)) if time_match.group(2) else 0
+                if 0 <= hour <= 23 and 0 <= minute <= 59:
+                    dt = dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            return dt.isoformat()
+
+    return None
 
 
 def _match_pattern(patterns: list[str], text: str) -> str | None:
@@ -839,7 +866,7 @@ def handle_message(
     sender_name = payload.get("sender_name")
     owner = payload.get("owner_e164") or payload.get("user_phone")
     is_owner = payload.get("is_owner") if payload.get("is_owner") is not None else sender == owner
-    chat_id = payload.get("chat_id") or payload.get("metadata", {}).get("remoteJid")
+    chat_id = payload.get("chat_id") or (payload.get("metadata") or {}).get("remoteJid")
     chat_type = payload.get("chat_type") or "direct"
     should_reply = payload.get("should_reply")
     monitor_only = payload.get("monitor_only", False)  # Phase 7: Monitored messages
@@ -1187,7 +1214,7 @@ def handle_message(
     if "resumo do dia" in lower or "resumo" == lower:
         return make_result(_build_summary(storage), "daily_summary")
 
-    if "mostrar tarefas" in lower or "tarefas" == lower:
+    if "listar tarefas" in lower or "mostrar tarefas" in lower or "tarefas" == lower:
         tasks = storage.list_tasks()
         if not tasks:
             reply = "Nao ha tarefas pendentes."
@@ -1233,7 +1260,7 @@ def handle_message(
         reply = _format_tasks_for_contact(tasks, contact_name)
         return make_result(reply, "tasks_for_contact")
 
-    if "agenda" in lower or "compromissos" in lower:
+    if lower in ("agenda", "compromissos", "listar compromissos", "meus compromissos", "mostrar compromissos"):
         appointments = storage.list_appointments()
         if not appointments:
             reply = "Nao ha compromissos agendados."
@@ -1246,10 +1273,12 @@ def handle_message(
 
     task_text = _match_pattern(TASK_PATTERNS, body)
     if task_text:
+        # Parse date from text first
+        parsed_due = _parse_datetime(task_text)
         # Use Tool System for create_task
         result = _execute_tool(
             "create_task",
-            {"title": task_text, "due_date": task_text},  # Let tool parse date
+            {"title": task_text, "due_date": parsed_due},
             storage=storage,
             session_id=session_id,
             user_phone=sender,
@@ -1260,11 +1289,10 @@ def handle_message(
             return make_result(reply, "create_task", ["task_created"])
         else:
             # Fallback to direct storage call
-            due_at = _parse_datetime(task_text)
-            task = storage.create_task(task_text, due_at)
+            task = storage.create_task(task_text, parsed_due)
             reply = f"Tarefa criada: {task.title}"
-            if due_at:
-                reply += f" (ate {due_at})"
+            if parsed_due:
+                reply += f" (ate {parsed_due})"
             return make_result(reply, "create_task", ["task_created"])
 
     appt_text = _match_pattern(APPOINTMENT_PATTERNS, body)

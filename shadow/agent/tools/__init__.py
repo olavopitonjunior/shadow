@@ -73,6 +73,18 @@ from .manage_monitored_groups import ManageMonitoredGroupsTool
 from .conversation_summary import ConversationSummaryTool
 from .contact_history import ContactHistoryTool
 
+# Subagent System
+from .spawn_task import SpawnTaskTool
+
+# Progressive Tool Loading (inspired by nanobot)
+from .meta_tools import (
+    ListAvailableToolsTool,
+    LoadToolTool,
+    TIER_1_TOOLS,
+    TIER_2_TOOLS,
+    get_tier,
+)
+
 __all__ = [
     # Base classes
     "Tool",
@@ -129,6 +141,14 @@ __all__ = [
     # CRM Oculto (Phase 8)
     "ConversationSummaryTool",
     "ContactHistoryTool",
+    # Subagent System
+    "SpawnTaskTool",
+    # Progressive Tool Loading
+    "ListAvailableToolsTool",
+    "LoadToolTool",
+    "TIER_1_TOOLS",
+    "TIER_2_TOOLS",
+    "get_tier",
     # Setup function
     "setup_default_tools",
 ]
@@ -203,6 +223,13 @@ def setup_default_tools(registry: ToolRegistry | None = None) -> ToolRegistry:
     # Register CRM Oculto tools (Phase 8)
     registry.register(ConversationSummaryTool())
     registry.register(ContactHistoryTool())
+
+    # Register subagent tool
+    registry.register(SpawnTaskTool())
+
+    # Register meta-tools for progressive loading
+    registry.register(ListAvailableToolsTool())
+    registry.register(LoadToolTool())
 
     print(f"[tools] Registered {len(registry)} default tools")
     return registry

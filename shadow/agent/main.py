@@ -33,6 +33,8 @@ from security import (
     get_access_policy,
 )
 from scheduler import ShadowScheduler
+from bus import get_message_bus, OutboundMessage
+from heartbeat import HeartbeatService
 
 app = FastAPI(
     title="Shadow Agent MVP",
@@ -49,24 +51,60 @@ access_policy = get_access_policy()
 
 # Scheduler para alertas e lembretes
 scheduler: ShadowScheduler | None = None
+heartbeat: HeartbeatService | None = None
+
+
+def _whatsapp_send_callback(msg: OutboundMessage) -> None:
+    """Send outbound messages to the WhatsApp gateway."""
+    import requests as _requests
+
+    gateway_url = config.gateway_send_url
+    if not gateway_url:
+        print(f"[bus] No gateway URL configured, dropping message to {msg.chat_id}")
+        return
+
+    try:
+        _requests.post(gateway_url, json={"text": msg.content}, timeout=10)
+    except Exception as e:
+        print(f"[bus] Failed to send via gateway: {e}")
 
 
 @app.on_event("startup")
 async def startup_event():
     """Inicia componentes assíncronos."""
-    global scheduler
+    global scheduler, heartbeat
+
+    # Start MessageBus dispatcher
+    bus = get_message_bus()
+    bus.subscribe_outbound("whatsapp", _whatsapp_send_callback)
+    bus.start_dispatcher()
+    print("[main] MessageBus dispatcher started")
+
+    # Start scheduler
     scheduler = ShadowScheduler()
     await scheduler.start()
     print("[main] Scheduler started")
+
+    # Start heartbeat
+    heartbeat = HeartbeatService(storage=storage)
+    heartbeat.start()
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Para componentes assíncronos."""
-    global scheduler
+    global scheduler, heartbeat
+
+    if heartbeat:
+        heartbeat.stop()
+        print("[main] Heartbeat stopped")
+
     if scheduler:
         await scheduler.stop()
         print("[main] Scheduler stopped")
+
+    bus = get_message_bus()
+    bus.stop()
 
 
 class ProcessRequest(BaseModel):

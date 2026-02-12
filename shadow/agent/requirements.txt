@@ -29,3 +29,6 @@ google-generativeai>=0.7.0
 
 # === Claude API (ReAct Agent) ===
 anthropic>=0.39.0
+
+# === Multi-Provider LLM (via LiteLLM) ===
+litellm>=1.40.0

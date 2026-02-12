@@ -14,6 +14,7 @@ import httpx
 
 from config import load_config
 from storage import Storage
+from bus import OutboundMessage, get_message_bus
 from cron_service import (
     CronService,
     CronJob,
@@ -25,8 +26,17 @@ from cron_service import (
 
 
 async def send_message(client: httpx.AsyncClient, url: str, message: str) -> None:
-    """Envia mensagem via gateway."""
-    await client.post(url, json={"text": message})
+    """Envia mensagem via MessageBus (preferred) ou gateway direto (fallback)."""
+    try:
+        bus = get_message_bus()
+        bus.publish_outbound(OutboundMessage(
+            channel="whatsapp",
+            chat_id="owner",
+            content=message,
+        ))
+    except Exception:
+        # Fallback to direct HTTP if bus is not available
+        await client.post(url, json={"text": message})
 
 
 def build_daily_summary(storage: Storage) -> str:

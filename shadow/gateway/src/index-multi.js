@@ -35,6 +35,8 @@ const DEFAULT_USER = "default";
 
 // Track outbound messages to avoid echo
 const outboundIds = new Map(); // userId -> Set<messageId>
+// Track processed inbound messages to avoid duplicates
+const processedIds = new Map(); // userId -> Set<messageId>
 const rememberOutboundId = (userId, id) => {
   if (!id) return;
   if (!outboundIds.has(userId)) {
@@ -57,17 +59,36 @@ const isOwner = (senderE164, ownerE164) => {
  * @param {object} sock - Baileys socket
  * @param {object} lidCache - LidCache instance for this session
  */
-const handleMessage = async (userId, upsert, sock, lidCache = null) => {
-  if (upsert.type !== "notify" && upsert.type !== "append") return;
+const handleMessage = async (userId, upsert, sock, lidCache = null, shadowGroupJid = null) => {
+  // Only process "notify" events to avoid duplicate processing
+  if (upsert.type !== "notify") return;
 
   const userOutbound = outboundIds.get(userId) || new Set();
+
+  // Deduplication: track processed message IDs
+  if (!processedIds.has(userId)) {
+    processedIds.set(userId, new Set());
+  }
+  const processed = processedIds.get(userId);
 
   for (const msg of upsert.messages ?? []) {
     if (!msg.message || !msg.key?.remoteJid) continue;
     if (msg.key.remoteJid.endsWith("@broadcast") || msg.key.remoteJid.endsWith("@status")) continue;
 
     if (config.ignoreFromMe && msg.key.fromMe) continue;
+    // fromMe messages: only process in Shadow group (or if triggered)
+    if (msg.key.fromMe && shadowGroupJid && msg.key.remoteJid !== shadowGroupJid) {
+      const msgText = extractText(msg.message).trim();
+      if (!matchTrigger(msgText, config.triggerTokens)) continue;
+    }
     if (msg.key.id && userOutbound.has(msg.key.id)) continue;
+
+    // Skip already-processed messages
+    if (msg.key.id && processed.has(msg.key.id)) continue;
+    if (msg.key.id) {
+      processed.add(msg.key.id);
+      setTimeout(() => processed.delete(msg.key.id), 5 * 60 * 1000).unref?.();
+    }
 
     const remoteJid = msg.key.remoteJid;
     const chatType = isGroupJid(remoteJid) ? "group" : "direct";
@@ -84,7 +105,7 @@ const handleMessage = async (userId, upsert, sock, lidCache = null) => {
 
     // Resolve to E.164 using multi-tier resolution (cache, Baileys)
     const lidMapping = sock.signalRepository?.lidMapping;
-    const { e164: senderE164, lid: senderLid, resolvedVia, cacheHit } = await resolveJidToE164(senderJid, lidMapping, lidCache);
+    let { e164: senderE164, lid: senderLid, resolvedVia, cacheHit } = await resolveJidToE164(senderJid, lidMapping, lidCache);
 
     // Log LID resolution details for debugging
     if (isLidJid(senderJid) && !senderE164) {
@@ -110,10 +131,23 @@ const handleMessage = async (userId, upsert, sock, lidCache = null) => {
     const ownerByFromMe = Boolean(msg.key.fromMe);
     const ownerByPhone = senderE164 && isOwner(senderE164, config.ownerE164);
     const ownerByLid = ownerLid && senderJid && normalizeLid(senderJid) === normalizeLid(ownerLid);
-    const actualIsOwner = ownerByFromMe || ownerByPhone || ownerByLid;
+    // Fallback: messages in the Shadow group must be from the owner (only member)
+    const ownerByShadowGroup = !!(shadowGroupJid && remoteJid === shadowGroupJid);
+    let actualIsOwner = ownerByFromMe || ownerByPhone || ownerByLid || ownerByShadowGroup;
+
+    // Cache LID→E164 mapping when detected via Shadow group fallback
+    if (ownerByShadowGroup && !senderE164 && senderJid && isLidJid(senderJid) && config.ownerE164 && lidCache) {
+      const ownerPhone = config.ownerE164.replace("+", "");
+      lidCache.set(normalizeLid(senderJid), ownerPhone);
+      senderE164 = config.ownerE164;
+      logger.info({ userId, lid: senderJid, e164: config.ownerE164 }, "LID cache: owner mapping learned from Shadow group");
+    }
 
     // Determine if we should reply
-    const selfChat = actualIsOwner && !isGroupJid(remoteJid);
+    const selfChat = actualIsOwner && (
+      (shadowGroupJid && remoteJid === shadowGroupJid) ||
+      (!isGroupJid(remoteJid) && msg.key.fromMe)
+    );
     let shouldReply = false;
     if (!config.replyToOwnerOnly) {
       if (chatType === "group") {
@@ -170,9 +204,17 @@ const handleMessage = async (userId, upsert, sock, lidCache = null) => {
         replyText = `${config.selfChatPrefix} ${replyText}`;
       }
 
-      const result = await sock.sendMessage(remoteJid, { text: replyText });
+      // Redirect self-chat replies to Shadow group
+      let replyJid = remoteJid;
+      const isSelfChat = msg.key.fromMe && !isGroupJid(remoteJid);
+      if (isSelfChat && shadowGroupJid) {
+        replyJid = shadowGroupJid;
+        logger.info({ from: remoteJid, to: replyJid }, "Redirecting self-chat reply to Shadow group");
+      }
+
+      const result = await sock.sendMessage(replyJid, { text: replyText });
       rememberOutboundId(userId, result?.key?.id);
-      logger.info({ userId, messageId: result?.key?.id }, "Reply sent");
+      logger.info({ userId, messageId: result?.key?.id, to: replyJid }, "Reply sent");
     }
   }
 };

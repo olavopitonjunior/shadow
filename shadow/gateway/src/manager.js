@@ -62,6 +62,47 @@ class GatewayManager {
   }
 
   /**
+   * Get shadow-config.json path for a session
+   * @param {string} authPath
+   * @returns {string}
+   */
+  _getShadowConfigPath(authPath) {
+    return path.join(authPath, "shadow-config.json");
+  }
+
+  /**
+   * Load per-session shadow config (group JID, etc.)
+   * @param {string} authPath
+   * @returns {object}
+   */
+  _loadShadowConfig(authPath) {
+    try {
+      const cfgPath = this._getShadowConfigPath(authPath);
+      if (fs.existsSync(cfgPath)) {
+        return JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+      }
+    } catch (_) {
+      // Ignore read errors, return empty
+    }
+    return {};
+  }
+
+  /**
+   * Save per-session shadow config
+   * @param {string} authPath
+   * @param {object} data
+   */
+  _saveShadowConfig(authPath, data) {
+    try {
+      const cfgPath = this._getShadowConfigPath(authPath);
+      fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+      fs.writeFileSync(cfgPath, JSON.stringify(data, null, 2), "utf8");
+    } catch (_) {
+      // Ignore write errors
+    }
+  }
+
+  /**
    * Connect a user session
    * @param {string} userId
    * @returns {Promise<{ success: boolean, status: string, qr?: string }>}
@@ -109,6 +150,8 @@ class GatewayManager {
       status: SESSION_STATUS.CONNECTING,
       authPath,
       qr: null,
+      qrUpdatedAt: null,
+      shadowGroupJid: null,
       logger,
       userId,
       lidCache,
@@ -118,12 +161,13 @@ class GatewayManager {
     // Set up event handlers
     sock.ev.on("creds.update", saveCreds);
 
-    sock.ev.on("connection.update", (update) => {
+    sock.ev.on("connection.update", async (update) => {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
         session.status = SESSION_STATUS.QR_PENDING;
         session.qr = qr;
+        session.qrUpdatedAt = Date.now();
         logger.info({ userId }, "QR code received");
         qrcode.generate(qr, { small: true });
       }
@@ -149,6 +193,26 @@ class GatewayManager {
         session.status = SESSION_STATUS.CONNECTED;
         session.qr = null;
 
+        // Auto-create Shadow group on first connect (or load existing)
+        const shadowCfg = this._loadShadowConfig(authPath);
+        if (shadowCfg.shadowGroupJid) {
+          session.shadowGroupJid = shadowCfg.shadowGroupJid;
+          logger.info({ userId, groupJid: session.shadowGroupJid }, "Shadow group loaded from config");
+        } else {
+          try {
+            const group = await sock.groupCreate("Shadow", []);
+            session.shadowGroupJid = group.id;
+            this._saveShadowConfig(authPath, { shadowGroupJid: group.id });
+            logger.info({ userId, groupJid: group.id }, "Shadow group auto-created");
+
+            await sock.sendMessage(group.id, {
+              text: `[Shadow] Olá! Sou seu assistente pessoal.\n\nMinhas mensagens sempre começam com [Shadow] para você identificar.\n\nComandos:\n- "criar tarefa comprar leite amanhã"\n- "listar tarefas"\n- "agendar reunião segunda 14h"\n- "listar compromissos"\n- "ajuda" - ver todos os comandos\n\nEnvie uma mensagem para começar!`,
+            });
+          } catch (err) {
+            logger.error({ userId, err: String(err) }, "Shadow group creation failed");
+          }
+        }
+
         // Set up LID cache event listeners
         sock.ev.on("chats.phoneNumberShare", ({ lid, jid }) => {
           const e164 = jidToE164(jid);
@@ -170,7 +234,7 @@ class GatewayManager {
     // Attach message handler if provided
     if (this.messageHandler) {
       sock.ev.on("messages.upsert", (upsert) => {
-        this.messageHandler(userId, upsert, sock, session.lidCache);
+        this.messageHandler(userId, upsert, sock, session.lidCache, session.shadowGroupJid);
       });
     }
 
@@ -252,6 +316,8 @@ class GatewayManager {
       phone: session.sock?.user?.id || null,
       lid: session.sock?.user?.lid || null,
       qr: session.qr,
+      qr_updated_at: session.qrUpdatedAt || null,
+      shadowGroupJid: session.shadowGroupJid || null,
       lidCacheStats: session.lidCache?.getStats() || null,
     };
   }
@@ -270,6 +336,7 @@ class GatewayManager {
     return {
       qr: session.qr,
       status: session.status,
+      qr_updated_at: session.qrUpdatedAt || null,
     };
   }
 
@@ -291,14 +358,14 @@ class GatewayManager {
 
   /**
    * Set message handler for all sessions
-   * @param {Function} handler - (userId, upsert, sock, lidCache) => void
+   * @param {Function} handler - (userId, upsert, sock, lidCache, shadowGroupJid) => void
    */
   setMessageHandler(handler) {
     this.messageHandler = handler;
     // Attach to existing sessions
     for (const [userId, session] of this.sessions) {
       session.sock.ev.on("messages.upsert", (upsert) => {
-        handler(userId, upsert, session.sock, session.lidCache);
+        handler(userId, upsert, session.sock, session.lidCache, session.shadowGroupJid);
       });
     }
   }
