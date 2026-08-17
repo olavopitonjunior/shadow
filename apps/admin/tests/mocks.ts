@@ -72,3 +72,92 @@ export const usersMock = {
     },
   ],
 };
+
+// Instance mocks for QA tests
+export const instanceMockConnected = {
+  id: "inst-001",
+  name: "WhatsApp Pessoal",
+  phone: "+5511999999999",
+  owner_e164: "+5511999999999",
+  gateway_user_id: "inst-001",
+  status: "connected",
+  live_status: "connected",
+  live_phone: "+5511999999999",
+  created_at: "2026-02-10T10:00:00Z",
+  connected_at: "2026-02-10T10:01:00Z",
+  disconnected_at: null,
+};
+
+export const instanceMockQrPending = {
+  id: "inst-002",
+  name: "WhatsApp Empresa",
+  phone: null,
+  owner_e164: null,
+  gateway_user_id: "inst-002",
+  status: "qr_pending",
+  live_status: "qr_pending",
+  live_phone: null,
+  created_at: "2026-02-10T12:00:00Z",
+  connected_at: null,
+  disconnected_at: null,
+};
+
+export const instanceMockDisconnected = {
+  id: "inst-003",
+  name: "WhatsApp Antigo",
+  phone: "+5511888888888",
+  owner_e164: "+5511888888888",
+  gateway_user_id: "inst-003",
+  status: "disconnected",
+  live_status: "disconnected",
+  live_phone: null,
+  created_at: "2026-02-01T08:00:00Z",
+  connected_at: "2026-02-01T08:01:00Z",
+  disconnected_at: "2026-02-09T22:00:00Z",
+};
+
+export const instanceStatsMock = {
+  messages: 142,
+  sessions: 5,
+  input_tokens: 85000,
+  output_tokens: 12000,
+  total_cost: 0.0234,
+};
+
+export const instanceConversationsMock = {
+  conversations: [
+    {
+      id: "sess-1",
+      participant_phone: "+5511977776666",
+      message_count: 23,
+      input_tokens: 12000,
+      output_tokens: 3000,
+      last_activity_at: "2026-02-10T15:30:00Z",
+    },
+  ],
+};
+
+export const instanceCostsMock = {
+  providers: {
+    anthropic: {
+      input_tokens: 85000,
+      output_tokens: 12000,
+      cost_usd: 0.0198,
+      calls: 45,
+    },
+  },
+  total_cost: 0.0198,
+  days: 30,
+};
+
+export const instanceLogsMock = {
+  logs: [
+    {
+      day: "2026-02-10",
+      provider: "anthropic",
+      input_tokens: 5000,
+      output_tokens: 800,
+      cost: 0.0012,
+    },
+  ],
+};

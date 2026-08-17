@@ -43,17 +43,17 @@ export default function Settings() {
   const serviceConnections = [
     {
       name: "Gateway (Baileys)",
-      url: process.env.VITE_GATEWAY_URL || "http://localhost:18790",
+      url: import.meta.env.VITE_GATEWAY_URL || "http://localhost:18790",
       status: gatewayHealth?.connections?.[0]?.status || "unknown",
     },
     {
       name: "Agent API",
-      url: process.env.VITE_AGENT_API_URL || "http://localhost:8090",
+      url: import.meta.env.VITE_AGENT_API_URL || "http://localhost:8090",
       status: agentHealth?.status || "unknown",
     },
     {
       name: "Admin API",
-      url: process.env.VITE_ADMIN_API_URL || "http://localhost:8099",
+      url: import.meta.env.VITE_ADMIN_API_URL || "http://localhost:8099",
       status: "healthy", // We're connected if this is running
     },
   ];

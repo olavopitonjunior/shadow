@@ -11,13 +11,23 @@ from crypto import get_crypto
 from storage.types import Task, Appointment
 
 class SqliteStorage:
-    def __init__(self, db_path: str | None = None) -> None:
-        self.db_path = db_path or resolve_db_path()
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self.crypto = get_crypto()
-        self._ensure_schema()
+    def __init__(self, db_path: str | None = None, owner_id: str | None = None, _conn: sqlite3.Connection | None = None) -> None:
+        self.owner_id = owner_id
+        if _conn is not None:
+            self._conn = _conn
+            self.db_path = db_path or ""
+            self.crypto = get_crypto()
+        else:
+            self.db_path = db_path or resolve_db_path()
+            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+            self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            self.crypto = get_crypto()
+            self._ensure_schema()
+
+    def for_owner(self, owner_id: str) -> "SqliteStorage":
+        """Return a view of this storage filtered by owner_id. Shares the DB connection."""
+        return SqliteStorage(db_path=self.db_path, owner_id=owner_id, _conn=self._conn)
 
     def _ensure_schema(self) -> None:
         cur = self._conn.cursor()
@@ -335,6 +345,9 @@ class SqliteStorage:
         # Phase 9: API usage tracking (migration 029)
         self._migrate_api_usage(cur)
 
+        # Phase 10: Channel users/messages/templates (migration 031)
+        self._migrate_channel_tables(cur)
+
     def _migrate_entities_phase7(self, cur: sqlite3.Cursor) -> None:
         """Add sender tracking columns to shadow_extracted_entities (migration 028)."""
         cur.execute("PRAGMA table_info(shadow_extracted_entities)")
@@ -539,6 +552,9 @@ class SqliteStorage:
             cur.execute("ALTER TABLE tasks ADD COLUMN category_id INTEGER")
         if "priority" not in existing:
             cur.execute("ALTER TABLE tasks ADD COLUMN priority TEXT DEFAULT 'normal'")
+        if "owner_id" not in existing:
+            cur.execute("ALTER TABLE tasks ADD COLUMN owner_id TEXT")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_tasks_owner ON tasks(owner_id)")
 
         # Add columns to appointments table
         cur.execute("PRAGMA table_info(appointments)")
@@ -549,6 +565,23 @@ class SqliteStorage:
             cur.execute("ALTER TABLE appointments ADD COLUMN location TEXT")
         if "video_link" not in existing:
             cur.execute("ALTER TABLE appointments ADD COLUMN video_link TEXT")
+        if "owner_id" not in existing:
+            cur.execute("ALTER TABLE appointments ADD COLUMN owner_id TEXT")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_appointments_owner ON appointments(owner_id)")
+
+        # Add owner_id to reminders table
+        cur.execute("PRAGMA table_info(reminders)")
+        existing = {row[1] for row in cur.fetchall()}
+        if "owner_id" not in existing:
+            cur.execute("ALTER TABLE reminders ADD COLUMN owner_id TEXT")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_reminders_owner ON reminders(owner_id)")
+
+        # Add owner_id to contacts table
+        cur.execute("PRAGMA table_info(contacts)")
+        existing = {row[1] for row in cur.fetchall()}
+        if "owner_id" not in existing:
+            cur.execute("ALTER TABLE contacts ADD COLUMN owner_id TEXT")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_contacts_owner ON contacts(owner_id)")
 
         self._conn.commit()
 
@@ -627,27 +660,36 @@ class SqliteStorage:
     def record_message(self, chat_id: str | None, sender: str | None, content: str, direction: str) -> None:
         self.ingest_message(chat_id, "direct", sender, None, content, direction, False)
 
+    def _owner_clause(self, table_alias: str = "") -> tuple[str, list]:
+        """Returns (sql_clause, params) for owner_id filtering."""
+        if self.owner_id is None:
+            return "", []
+        prefix = f"{table_alias}." if table_alias else ""
+        return f" AND {prefix}owner_id = ?", [self.owner_id]
+
     def list_tasks(self, limit: int = 10) -> list[Task]:
         cur = self._conn.cursor()
+        owner_sql, owner_params = self._owner_clause()
         cur.execute(
-            "SELECT id, title, due_at, status FROM tasks WHERE status = 'pending' ORDER BY due_at IS NULL, due_at LIMIT ?",
-            (limit,),
+            f"SELECT id, title, due_at, status FROM tasks WHERE status = 'pending'{owner_sql} ORDER BY due_at IS NULL, due_at LIMIT ?",
+            (*owner_params, limit),
         )
         return [Task(**dict(row)) for row in cur.fetchall()]
 
     def list_appointments(self, limit: int = 10) -> list[Appointment]:
         cur = self._conn.cursor()
+        owner_sql, owner_params = self._owner_clause()
         cur.execute(
-            "SELECT id, title, scheduled_at, duration_minutes FROM appointments ORDER BY scheduled_at LIMIT ?",
-            (limit,),
+            f"SELECT id, title, scheduled_at, duration_minutes FROM appointments WHERE 1=1{owner_sql} ORDER BY scheduled_at LIMIT ?",
+            (*owner_params, limit),
         )
         return [Appointment(**dict(row)) for row in cur.fetchall()]
 
     def create_task(self, title: str, due_at: str | None) -> Task:
         cur = self._conn.cursor()
         cur.execute(
-            "INSERT INTO tasks (title, due_at, status, created_at) VALUES (?, ?, 'pending', ?)",
-            (title, due_at, datetime.utcnow().isoformat()),
+            "INSERT INTO tasks (title, due_at, status, created_at, owner_id) VALUES (?, ?, 'pending', ?, ?)",
+            (title, due_at, datetime.utcnow().isoformat(), self.owner_id),
         )
         self._conn.commit()
         task_id = cur.lastrowid
@@ -656,8 +698,8 @@ class SqliteStorage:
     def create_appointment(self, title: str, scheduled_at: str, duration_minutes: int = 60) -> Appointment:
         cur = self._conn.cursor()
         cur.execute(
-            "INSERT INTO appointments (title, scheduled_at, duration_minutes, created_at) VALUES (?, ?, ?, ?)",
-            (title, scheduled_at, duration_minutes, datetime.utcnow().isoformat()),
+            "INSERT INTO appointments (title, scheduled_at, duration_minutes, created_at, owner_id) VALUES (?, ?, ?, ?, ?)",
+            (title, scheduled_at, duration_minutes, datetime.utcnow().isoformat(), self.owner_id),
         )
         self._conn.commit()
         appointment_id = cur.lastrowid
@@ -668,7 +710,8 @@ class SqliteStorage:
     def get_task(self, task_id: int) -> Task | None:
         """Get a task by ID."""
         cur = self._conn.cursor()
-        cur.execute("SELECT id, title, due_at, status FROM tasks WHERE id = ?", (task_id,))
+        owner_sql, owner_params = self._owner_clause()
+        cur.execute(f"SELECT id, title, due_at, status FROM tasks WHERE id = ?{owner_sql}", (task_id, *owner_params))
         row = cur.fetchone()
         return Task(**dict(row)) if row else None
 
@@ -684,8 +727,8 @@ class SqliteStorage:
         """Update a task's fields."""
         cur = self._conn.cursor()
 
-        # Check if task exists
-        cur.execute("SELECT id, title, due_at, status FROM tasks WHERE id = ?", (task_id,))
+        owner_sql, owner_params = self._owner_clause()
+        cur.execute(f"SELECT id, title, due_at, status FROM tasks WHERE id = ?{owner_sql}", (task_id, *owner_params))
         row = cur.fetchone()
         if not row:
             return None
@@ -714,11 +757,11 @@ class SqliteStorage:
             return Task(**current)
 
         values.append(task_id)
-        cur.execute(f"UPDATE tasks SET {', '.join(updates)} WHERE id = ?", values)
+        values.extend(owner_params)
+        cur.execute(f"UPDATE tasks SET {', '.join(updates)} WHERE id = ?{owner_sql}", values)
         self._conn.commit()
 
-        # Return updated task
-        cur.execute("SELECT id, title, due_at, status FROM tasks WHERE id = ?", (task_id,))
+        cur.execute(f"SELECT id, title, due_at, status FROM tasks WHERE id = ?{owner_sql}", (task_id, *owner_params))
         row = cur.fetchone()
         return Task(**dict(row)) if row else None
 
@@ -730,8 +773,8 @@ class SqliteStorage:
         """Delete a task (soft or hard)."""
         cur = self._conn.cursor()
 
-        # Check if task exists
-        cur.execute("SELECT id, title, due_at, status FROM tasks WHERE id = ?", (task_id,))
+        owner_sql, owner_params = self._owner_clause()
+        cur.execute(f"SELECT id, title, due_at, status FROM tasks WHERE id = ?{owner_sql}", (task_id, *owner_params))
         row = cur.fetchone()
         if not row:
             return {"success": False, "error": "Tarefa não encontrada"}
@@ -739,9 +782,9 @@ class SqliteStorage:
         task = dict(row)
 
         if hard_delete:
-            cur.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+            cur.execute(f"DELETE FROM tasks WHERE id = ?{owner_sql}", (task_id, *owner_params))
         else:
-            cur.execute("UPDATE tasks SET status = 'deleted' WHERE id = ?", (task_id,))
+            cur.execute(f"UPDATE tasks SET status = 'deleted' WHERE id = ?{owner_sql}", (task_id, *owner_params))
 
         self._conn.commit()
 
@@ -757,9 +800,10 @@ class SqliteStorage:
     def get_appointment(self, appointment_id: int) -> Appointment | None:
         """Get an appointment by ID."""
         cur = self._conn.cursor()
+        owner_sql, owner_params = self._owner_clause()
         cur.execute(
-            "SELECT id, title, scheduled_at, duration_minutes FROM appointments WHERE id = ?",
-            (appointment_id,),
+            f"SELECT id, title, scheduled_at, duration_minutes FROM appointments WHERE id = ?{owner_sql}",
+            (appointment_id, *owner_params),
         )
         row = cur.fetchone()
         return Appointment(**dict(row)) if row else None
@@ -776,10 +820,10 @@ class SqliteStorage:
         """Update an appointment's fields."""
         cur = self._conn.cursor()
 
-        # Check if appointment exists
+        owner_sql, owner_params = self._owner_clause()
         cur.execute(
-            "SELECT id, title, scheduled_at, duration_minutes FROM appointments WHERE id = ?",
-            (appointment_id,),
+            f"SELECT id, title, scheduled_at, duration_minutes FROM appointments WHERE id = ?{owner_sql}",
+            (appointment_id, *owner_params),
         )
         row = cur.fetchone()
         if not row:
@@ -809,13 +853,13 @@ class SqliteStorage:
             return Appointment(**current)
 
         values.append(appointment_id)
-        cur.execute(f"UPDATE appointments SET {', '.join(updates)} WHERE id = ?", values)
+        values.extend(owner_params)
+        cur.execute(f"UPDATE appointments SET {', '.join(updates)} WHERE id = ?{owner_sql}", values)
         self._conn.commit()
 
-        # Return updated appointment
         cur.execute(
-            "SELECT id, title, scheduled_at, duration_minutes FROM appointments WHERE id = ?",
-            (appointment_id,),
+            f"SELECT id, title, scheduled_at, duration_minutes FROM appointments WHERE id = ?{owner_sql}",
+            (appointment_id, *owner_params),
         )
         row = cur.fetchone()
         return Appointment(**dict(row)) if row else None
@@ -824,17 +868,17 @@ class SqliteStorage:
         """Delete an appointment (hard delete)."""
         cur = self._conn.cursor()
 
-        # Check if appointment exists
+        owner_sql, owner_params = self._owner_clause()
         cur.execute(
-            "SELECT id, title, scheduled_at, duration_minutes FROM appointments WHERE id = ?",
-            (appointment_id,),
+            f"SELECT id, title, scheduled_at, duration_minutes FROM appointments WHERE id = ?{owner_sql}",
+            (appointment_id, *owner_params),
         )
         row = cur.fetchone()
         if not row:
             return {"success": False, "error": "Compromisso não encontrado"}
 
         appointment = dict(row)
-        cur.execute("DELETE FROM appointments WHERE id = ?", (appointment_id,))
+        cur.execute(f"DELETE FROM appointments WHERE id = ?{owner_sql}", (appointment_id, *owner_params))
         self._conn.commit()
 
         return {
@@ -1342,18 +1386,18 @@ class SqliteStorage:
     ) -> None:
         enc_message = self.crypto.encrypt_text(message, aad="reminder:message")
         cur = self._conn.cursor()
-        # Note: SQLite version doesn't use target_phone yet (Supabase does)
         cur.execute(
-            "INSERT INTO reminders (remind_at, message, task_id, appointment_id, sent, created_at) VALUES (?, ?, ?, ?, 0, ?)",
-            (remind_at, enc_message, task_id, appointment_id, datetime.utcnow().isoformat()),
+            "INSERT INTO reminders (remind_at, message, task_id, appointment_id, sent, created_at, owner_id) VALUES (?, ?, ?, ?, 0, ?, ?)",
+            (remind_at, enc_message, task_id, appointment_id, datetime.utcnow().isoformat(), self.owner_id),
         )
         self._conn.commit()
 
     def pending_reminders(self, now_iso: str) -> Iterable[dict]:
         cur = self._conn.cursor()
+        owner_sql, owner_params = self._owner_clause()
         cur.execute(
-            "SELECT id, remind_at, message FROM reminders WHERE sent = 0 AND remind_at <= ?",
-            (now_iso,),
+            f"SELECT id, remind_at, message FROM reminders WHERE sent = 0 AND remind_at <= ?{owner_sql}",
+            (now_iso, *owner_params),
         )
         rows = [dict(row) for row in cur.fetchall()]
         for row in rows:
@@ -2904,5 +2948,228 @@ class SqliteStorage:
         cur.execute("DELETE FROM shadow_instances WHERE id = ?", (instance_id,))
         self._conn.commit()
         return True
+
+    # ── Channel Tables (Migration 031) ────────────────────────────────
+
+    def _migrate_channel_tables(self, cur: sqlite3.Cursor) -> None:
+        """Create channel users, messages, and templates tables."""
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS shadow_channel_users (
+                id TEXT PRIMARY KEY,
+                phone_e164 TEXT NOT NULL UNIQUE,
+                owner_id TEXT NOT NULL,
+                instance_id TEXT,
+                display_name TEXT,
+                user_type TEXT DEFAULT 'standalone',
+                channel TEXT DEFAULT 'evolution',
+                status TEXT DEFAULT 'active',
+                last_message_at TEXT,
+                last_window_opened_at TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                metadata TEXT DEFAULT '{}'
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_channel_users_phone ON shadow_channel_users(phone_e164)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_channel_users_owner ON shadow_channel_users(owner_id)")
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS shadow_channel_messages (
+                id TEXT PRIMARY KEY,
+                external_id TEXT UNIQUE,
+                user_phone TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                message_type TEXT DEFAULT 'text',
+                content TEXT,
+                template_name TEXT,
+                status TEXT DEFAULT 'sent',
+                cost_category TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_channel_msgs_ext ON shadow_channel_messages(external_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_channel_msgs_phone ON shadow_channel_messages(user_phone)")
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS shadow_channel_templates (
+                id TEXT PRIMARY KEY,
+                template_name TEXT NOT NULL UNIQUE,
+                language TEXT DEFAULT 'pt_BR',
+                category TEXT,
+                status TEXT DEFAULT 'draft',
+                body_text TEXT,
+                components TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        self._conn.commit()
+
+    # ── Channel User CRUD ─────────────────────────────────────────────
+
+    def create_channel_user(
+        self,
+        phone_e164: str,
+        owner_id: str,
+        instance_id: str | None = None,
+        display_name: str | None = None,
+        user_type: str = "standalone",
+        channel: str = "evolution",
+        status: str = "active",
+    ) -> dict:
+        """Create a new channel user."""
+        import uuid
+
+        uid = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        cur = self._conn.cursor()
+        cur.execute(
+            """INSERT INTO shadow_channel_users
+               (id, phone_e164, owner_id, instance_id, display_name, user_type, channel, status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (uid, phone_e164, owner_id, instance_id, display_name, user_type, channel, status, now),
+        )
+        self._conn.commit()
+        return self.get_channel_user_by_phone(phone_e164) or {"id": uid}
+
+    def get_channel_user_by_phone(self, phone_e164: str) -> dict | None:
+        """Get channel user by phone number."""
+        cur = self._conn.cursor()
+        cur.execute("SELECT * FROM shadow_channel_users WHERE phone_e164 = ?", (phone_e164,))
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def update_channel_user(self, phone_e164: str, **kwargs) -> dict | None:
+        """Update channel user fields."""
+        allowed = {
+            "display_name", "user_type", "channel", "status",
+            "instance_id", "last_message_at", "last_window_opened_at", "metadata",
+        }
+        updates = {k: v for k, v in kwargs.items() if k in allowed}
+        if not updates:
+            return self.get_channel_user_by_phone(phone_e164)
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [phone_e164]
+        cur = self._conn.cursor()
+        cur.execute(f"UPDATE shadow_channel_users SET {set_clause} WHERE phone_e164 = ?", values)
+        self._conn.commit()
+        return self.get_channel_user_by_phone(phone_e164)
+
+    def list_channel_users(self, status: str | None = None, limit: int = 100) -> list[dict]:
+        """List channel users, optionally filtered by status."""
+        cur = self._conn.cursor()
+        if status:
+            cur.execute(
+                "SELECT * FROM shadow_channel_users WHERE status = ? ORDER BY last_message_at DESC LIMIT ?",
+                (status, limit),
+            )
+        else:
+            cur.execute("SELECT * FROM shadow_channel_users ORDER BY last_message_at DESC LIMIT ?", (limit,))
+        return [dict(r) for r in cur.fetchall()]
+
+    def find_instance_by_phone(self, phone_e164: str) -> dict | None:
+        """Find an instance whose owner_e164 matches the given phone."""
+        cur = self._conn.cursor()
+        # Try with and without + prefix
+        phone_clean = phone_e164.lstrip("+")
+        cur.execute(
+            "SELECT * FROM shadow_instances WHERE owner_e164 = ? OR owner_e164 = ?",
+            (phone_e164, phone_clean),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    # ── Channel Message Log ───────────────────────────────────────────
+
+    def log_channel_message(
+        self,
+        user_phone: str,
+        direction: str,
+        channel: str,
+        content: str | None = None,
+        external_id: str | None = None,
+        message_type: str = "text",
+        template_name: str | None = None,
+        status: str = "sent",
+        cost_category: str | None = None,
+    ) -> str:
+        """Log a channel message (inbound or outbound)."""
+        import uuid
+
+        msg_id = str(uuid.uuid4())
+        cur = self._conn.cursor()
+        cur.execute(
+            """INSERT INTO shadow_channel_messages
+               (id, external_id, user_phone, direction, channel, message_type, content, template_name, status, cost_category)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (msg_id, external_id, user_phone, direction, channel, message_type, content, template_name, status, cost_category),
+        )
+        self._conn.commit()
+        return msg_id
+
+    def get_channel_message_by_external_id(self, external_id: str) -> dict | None:
+        """Get channel message by external_id (for dedup)."""
+        cur = self._conn.cursor()
+        cur.execute("SELECT * FROM shadow_channel_messages WHERE external_id = ?", (external_id,))
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def list_channel_messages(
+        self, user_phone: str | None = None, limit: int = 50, offset: int = 0
+    ) -> list[dict]:
+        """List channel messages, optionally filtered by phone."""
+        cur = self._conn.cursor()
+        if user_phone:
+            cur.execute(
+                "SELECT * FROM shadow_channel_messages WHERE user_phone = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (user_phone, limit, offset),
+            )
+        else:
+            cur.execute(
+                "SELECT * FROM shadow_channel_messages ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            )
+        return [dict(r) for r in cur.fetchall()]
+
+    # ── Channel Templates ─────────────────────────────────────────────
+
+    def create_channel_template(
+        self,
+        template_name: str,
+        body_text: str,
+        category: str = "UTILITY",
+        language: str = "pt_BR",
+        components: str | None = None,
+    ) -> dict:
+        """Create a channel template."""
+        import uuid
+
+        tid = str(uuid.uuid4())
+        cur = self._conn.cursor()
+        cur.execute(
+            """INSERT INTO shadow_channel_templates
+               (id, template_name, language, category, status, body_text, components)
+               VALUES (?, ?, ?, ?, 'draft', ?, ?)""",
+            (tid, template_name, language, category, body_text, components),
+        )
+        self._conn.commit()
+        return {"id": tid, "template_name": template_name, "status": "draft"}
+
+    def list_channel_templates(self) -> list[dict]:
+        """List all channel templates."""
+        cur = self._conn.cursor()
+        cur.execute("SELECT * FROM shadow_channel_templates ORDER BY created_at DESC")
+        return [dict(r) for r in cur.fetchall()]
+
+    def update_channel_template_status(self, template_name: str, status: str) -> dict | None:
+        """Update template status (draft, submitted, approved, rejected)."""
+        cur = self._conn.cursor()
+        cur.execute(
+            "UPDATE shadow_channel_templates SET status = ? WHERE template_name = ?",
+            (status, template_name),
+        )
+        self._conn.commit()
+        cur.execute("SELECT * FROM shadow_channel_templates WHERE template_name = ?", (template_name,))
+        row = cur.fetchone()
+        return dict(row) if row else None
 
 

@@ -4,7 +4,10 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import config_routes, instances, logs, overview, proxy, usage, users
+from routers import (
+    agents, analytics, channel, config_routes, crm, documents,
+    instances, integrations, logs, overview, proxy, usage, users,
+)
 
 APP_NAME = "Shadow Admin API"
 
@@ -31,6 +34,12 @@ app.include_router(users.router)
 app.include_router(config_routes.router)
 app.include_router(usage.router)
 app.include_router(instances.router)
+app.include_router(channel.router)
+app.include_router(agents.router)
+app.include_router(crm.router)
+app.include_router(analytics.router)
+app.include_router(documents.router)
+app.include_router(integrations.router)
 
 
 @app.get("/health")

@@ -1,0 +1,50 @@
+<html>
+<head><meta charset="utf-8"><title>Proposta Comercial</title></head>
+<body style="font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 40px;">
+
+<h1 style="color: #1a1a2e;">Proposta Comercial</h1>
+<p style="color: #666;">Data: {{ date }}</p>
+
+<hr style="border: 1px solid #e0e0e0;">
+
+<h2>Para</h2>
+<p><strong>{{ contact_name }}</strong></p>
+{% if contact_company %}<p>{{ contact_company }}</p>{% endif %}
+{% if contact_email %}<p>{{ contact_email }}</p>{% endif %}
+{% if contact_phone %}<p>{{ contact_phone }}</p>{% endif %}
+
+<hr style="border: 1px solid #e0e0e0;">
+
+<h2>Escopo do Projeto</h2>
+<p>{{ project_scope }}</p>
+
+{% if deliverables %}
+<h3>Entregaveis</h3>
+<ul>
+{% for item in deliverables %}
+  <li>{{ item }}</li>
+{% endfor %}
+</ul>
+{% endif %}
+
+<h2>Cronograma</h2>
+<p>{{ timeline }}</p>
+
+<h2>Investimento</h2>
+<p style="font-size: 1.2em;"><strong>{{ pricing }}</strong></p>
+
+{% if payment_terms %}
+<h3>Condicoes de Pagamento</h3>
+<p>{{ payment_terms }}</p>
+{% endif %}
+
+<h2>Proximos Passos</h2>
+<p>{{ next_steps }}</p>
+
+<hr style="border: 1px solid #e0e0e0;">
+<p style="color: #999; font-size: 0.9em;">
+  Proposta valida por 30 dias. Gerado automaticamente por Shadow.
+</p>
+
+</body>
+</html>

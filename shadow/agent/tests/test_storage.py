@@ -266,3 +266,100 @@ class TestPackageImports:
             id=1, title="meeting", scheduled_at="2026-01-01", duration_minutes=30
         )
         assert a.duration_minutes == 30
+
+
+class TestMultiTenantIsolation:
+    """Verify owner_id isolation across tasks, appointments, and reminders."""
+
+    def test_tasks_isolated_by_owner(self, tmp_db):
+        from storage.sqlite_storage import SqliteStorage
+
+        base = SqliteStorage(db_path=tmp_db)
+        owner_a = base.for_owner("+5511111111111")
+        owner_b = base.for_owner("+5522222222222")
+
+        owner_a.create_task("Task A", None)
+        owner_b.create_task("Task B", None)
+
+        tasks_a = owner_a.list_tasks()
+        tasks_b = owner_b.list_tasks()
+
+        assert len(tasks_a) == 1
+        assert tasks_a[0].title == "Task A"
+        assert len(tasks_b) == 1
+        assert tasks_b[0].title == "Task B"
+
+    def test_appointments_isolated_by_owner(self, tmp_db):
+        from storage.sqlite_storage import SqliteStorage
+
+        base = SqliteStorage(db_path=tmp_db)
+        owner_a = base.for_owner("+5511111111111")
+        owner_b = base.for_owner("+5522222222222")
+
+        owner_a.create_appointment("Meeting A", "2026-03-15 10:00")
+        owner_b.create_appointment("Meeting B", "2026-03-15 14:00")
+
+        appts_a = owner_a.list_appointments()
+        appts_b = owner_b.list_appointments()
+
+        assert len(appts_a) == 1
+        assert appts_a[0].title == "Meeting A"
+        assert len(appts_b) == 1
+        assert appts_b[0].title == "Meeting B"
+
+    def test_reminders_isolated_by_owner(self, tmp_db):
+        from storage.sqlite_storage import SqliteStorage
+
+        base = SqliteStorage(db_path=tmp_db)
+        owner_a = base.for_owner("+5511111111111")
+        owner_b = base.for_owner("+5522222222222")
+
+        owner_a.create_reminder("2020-01-01T00:00:00Z", "Reminder A")
+        owner_b.create_reminder("2020-01-01T00:00:00Z", "Reminder B")
+
+        pending_a = list(owner_a.pending_reminders("2026-12-31T00:00:00Z"))
+        pending_b = list(owner_b.pending_reminders("2026-12-31T00:00:00Z"))
+
+        assert len(pending_a) == 1
+        assert "Reminder A" in pending_a[0]["message"]
+        assert len(pending_b) == 1
+        assert "Reminder B" in pending_b[0]["message"]
+
+    def test_owner_cannot_access_other_tasks(self, tmp_db):
+        from storage.sqlite_storage import SqliteStorage
+
+        base = SqliteStorage(db_path=tmp_db)
+        owner_a = base.for_owner("+5511111111111")
+        owner_b = base.for_owner("+5522222222222")
+
+        task = owner_a.create_task("Secret Task", None)
+        # Owner B should NOT see or modify Owner A's task
+        assert owner_b.get_task(task.id) is None
+        assert owner_b.complete_task(task.id) is None
+        result = owner_b.delete_task(task.id)
+        assert result["success"] is False
+
+    def test_no_owner_sees_all(self, tmp_db):
+        from storage.sqlite_storage import SqliteStorage
+
+        base = SqliteStorage(db_path=tmp_db)
+        owner_a = base.for_owner("+5511111111111")
+
+        owner_a.create_task("Owned Task", None)
+        # Base storage (no owner_id) should see everything
+        all_tasks = base.list_tasks()
+        assert len(all_tasks) >= 1
+
+    def test_for_owner_via_wrapper(self, tmp_db):
+        from storage.wrapper import Storage
+        from storage.sqlite_storage import SqliteStorage
+
+        impl = SqliteStorage(db_path=tmp_db)
+        wrapper = Storage(_impl=impl)
+
+        scoped = wrapper.for_owner("+5511111111111")
+        task = scoped.create_task("Wrapper Task", None)
+        assert task.title == "Wrapper Task"
+
+        tasks = scoped.list_tasks()
+        assert len(tasks) == 1

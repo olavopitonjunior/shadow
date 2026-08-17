@@ -21,11 +21,18 @@ class CreateInstanceBody(BaseModel):
 def _get_storage():
     """Import agent storage for instance data."""
     try:
-        agent_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "shadow", "agent")
+        agent_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "..", "shadow", "agent")
         if agent_dir not in sys.path:
             sys.path.insert(0, agent_dir)
-        from storage import Storage
-        return Storage()
+        # Temporarily swap out admin-api's 'config' module to avoid collision
+        # with shadow/agent/config.py (which has resolve_db_path).
+        _orig_config = sys.modules.pop("config", None)
+        try:
+            from storage import Storage
+            return Storage()
+        finally:
+            if _orig_config is not None:
+                sys.modules["config"] = _orig_config
     except Exception:
         return None
 
@@ -208,7 +215,11 @@ def get_instance_qr(
         raise HTTPException(404, "Instance not found")
 
     result = _gateway_request("GET", f"/sessions/{instance['gateway_user_id']}/qr")
-    return {"qr": result.get("qr"), "status": result.get("status", "disconnected")}
+    return {
+        "qr": result.get("qr"),
+        "status": result.get("status", "disconnected"),
+        "qr_updated_at": result.get("qr_updated_at"),
+    }
 
 
 @router.get("/{instance_id}/status")
@@ -240,7 +251,12 @@ def get_instance_status(
         updates["connected_at"] = datetime.now(timezone.utc).isoformat()
     storage.update_instance(instance_id, **updates)
 
-    return {"status": status, "phone": phone, "qr": result.get("qr")}
+    return {
+        "status": status,
+        "phone": phone,
+        "qr": result.get("qr"),
+        "qr_updated_at": result.get("qr_updated_at"),
+    }
 
 
 @router.get("/{instance_id}/stats")
@@ -267,7 +283,7 @@ def get_instance_stats(
                 sessions = sessions.get("sessions", [])
             for s in sessions:
                 participant = s.get("participant_phone", "")
-                if instance.get("owner_e164") and participant and instance["owner_e164"] in participant:
+                if instance.get("owner_e164") and participant and instance["owner_e164"] == participant:
                     stats["sessions"] += 1
                     stats["messages"] += s.get("message_count", 0)
                     stats["input_tokens"] += s.get("input_tokens", 0)
@@ -313,8 +329,13 @@ def get_instance_conversations(
     except Exception:
         sessions = []
 
-    # Filter by instance owner phone (if known)
-    # For now return all sessions - filtering will improve when instance-session linking is added
+    # Filter by instance owner phone
+    owner = instance.get("owner_e164")
+    if owner:
+        sessions = [
+            s for s in sessions
+            if s.get("participant_phone") == owner
+        ]
     return {"conversations": sessions[:limit]}
 
 
@@ -333,7 +354,7 @@ def get_instance_costs(
     if not instance:
         raise HTTPException(404, "Instance not found")
 
-    # For now, return global costs (per-instance filtering requires session linking)
+    # Return costs filtered by instance gateway_user_id when available
     if hasattr(storage, "get_usage_summary"):
         usage = storage.get_usage_summary(days)
         providers = {}

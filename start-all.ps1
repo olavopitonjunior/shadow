@@ -35,6 +35,30 @@ function Set-EnvFromFile {
 
 Set-EnvFromFile $envFile
 
+# 0. Evolution API (Docker) - only if channel enabled
+if ($env:SHADOW_CHANNEL_ENABLED -eq "true" -and $env:SHADOW_CHANNEL_ADAPTER -eq "evolution") {
+    Write-Host "  [0/4] Evolution API starting on :8080..." -ForegroundColor Magenta
+    $running = docker ps --filter "name=shadow-evolution" --format "{{.Names}}" 2>$null
+    if ($running -eq "shadow-evolution") {
+        Write-Host "        Already running." -ForegroundColor DarkGray
+    } else {
+        $apiKey = if ($env:EVOLUTION_API_KEY) { $env:EVOLUTION_API_KEY } else { "shadow-evo-key" }
+        docker run -d --name shadow-evolution `
+            -p 8080:8080 `
+            -e AUTHENTICATION_API_KEY=$apiKey `
+            -e WEBHOOK_GLOBAL_URL=http://host.docker.internal:8090/webhook/channel `
+            -e WEBHOOK_GLOBAL_ENABLED=true `
+            -v "${root}\shadow\data\evolution:/evolution/store" `
+            atendai/evolution-api 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            # Container may exist but be stopped
+            docker start shadow-evolution 2>$null
+        }
+        Write-Host "        Started. Dashboard: http://localhost:8080" -ForegroundColor DarkGray
+    }
+    Start-Sleep -Seconds 3
+}
+
 # 1. Agent (background job)
 Write-Host "  [1/4] Agent starting on :8090..." -ForegroundColor Green
 $agentJob = Start-Job -ScriptBlock {

@@ -13,11 +13,16 @@ router = APIRouter(tags=["usage"])
 def _get_storage():
     """Tenta importar storage do agent para acesso ao SQLite."""
     try:
-        agent_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "shadow", "agent")
+        agent_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "..", "shadow", "agent")
         if agent_dir not in sys.path:
             sys.path.insert(0, agent_dir)
-        from storage import Storage
-        return Storage()
+        _orig_config = sys.modules.pop("config", None)
+        try:
+            from storage import Storage
+            return Storage()
+        finally:
+            if _orig_config is not None:
+                sys.modules["config"] = _orig_config
     except Exception:
         return None
 

@@ -39,6 +39,51 @@ async def send_message(client: httpx.AsyncClient, url: str, message: str) -> Non
         await client.post(url, json={"text": message})
 
 
+async def send_to_channel_users(storage: Storage, message_builder=None) -> int:
+    """Send messages to all active channel users via MessageBus.
+
+    Args:
+        storage: Storage instance
+        message_builder: Optional callable(owner_id, storage) -> str | None
+
+    Returns:
+        Number of messages sent
+    """
+    sent = 0
+    try:
+        users = storage.list_channel_users(status="active")
+        bus = get_message_bus()
+
+        for user in users:
+            phone = user.get("phone_e164", "")
+            owner_id = user.get("owner_id", "")
+            if not phone:
+                continue
+
+            # Build per-user message if builder provided
+            if message_builder:
+                scoped = storage.for_owner(owner_id) if hasattr(storage, "for_owner") else storage
+                text = message_builder(owner_id, scoped)
+                if not text:
+                    continue
+            else:
+                text = None
+
+            if text:
+                bus.publish_outbound(OutboundMessage(
+                    channel="channel",
+                    chat_id=f"channel:{phone}",
+                    content=text,
+                    target_phone=phone,
+                ))
+                sent += 1
+
+    except Exception as e:
+        print(f"[scheduler] Error sending to channel users: {e}")
+
+    return sent
+
+
 def build_daily_summary(storage: Storage) -> str:
     """Constrói resumo diário de tarefas e compromissos."""
     tasks = storage.list_tasks(20)
@@ -114,16 +159,30 @@ class ShadowScheduler:
 
         @self.cron_service.register_action("daily_summary")
         async def handle_daily_summary(job: CronJob) -> dict:
-            """Envia resumo diário."""
+            """Envia resumo diário via Baileys + channel users."""
+            sent_baileys = False
+            sent_channel = 0
+
+            # Send via Baileys (legacy)
             if self._http_client and self.gateway_url:
                 try:
                     summary = build_daily_summary(self.storage)
                     await send_message(self._http_client, self.gateway_url, summary)
-                    print("[scheduler] Daily summary sent via CronService")
-                    return {"status": "ok"}
+                    sent_baileys = True
                 except Exception as e:
-                    return {"status": "error", "error": str(e)}
-            return {"status": "skipped"}
+                    print(f"[scheduler] Baileys daily summary failed: {e}")
+
+            # Send to channel users
+            try:
+                def _build_user_summary(owner_id, scoped_storage):
+                    return build_daily_summary(scoped_storage)
+
+                sent_channel = await send_to_channel_users(self.storage, _build_user_summary)
+            except Exception as e:
+                print(f"[scheduler] Channel daily summary failed: {e}")
+
+            print(f"[scheduler] Daily summary: baileys={sent_baileys}, channel_users={sent_channel}")
+            return {"status": "ok", "baileys": sent_baileys, "channel_users": sent_channel}
 
         @self.cron_service.register_action("check_reminders")
         async def handle_check_reminders(job: CronJob) -> dict:

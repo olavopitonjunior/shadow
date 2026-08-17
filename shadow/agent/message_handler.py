@@ -329,7 +329,7 @@ def _should_extract_entities(
         True if should extract entities, False otherwise
     """
     # Always extract from private/direct chats
-    if chat_type == "direct" or (chat_id and "@s.whatsapp.net" in chat_id):
+    if chat_type == "direct" or (chat_id and ("@s.whatsapp.net" in chat_id or chat_id.startswith("channel:"))):
         return True
 
     # For groups, check user settings
@@ -866,6 +866,10 @@ def handle_message(
     sender_name = payload.get("sender_name")
     owner = payload.get("owner_e164") or payload.get("user_phone")
     is_owner = payload.get("is_owner") if payload.get("is_owner") is not None else sender == owner
+
+    # Multi-tenant: create owner-scoped storage view
+    if owner and hasattr(storage, "for_owner"):
+        storage = storage.for_owner(owner)
     chat_id = payload.get("chat_id") or (payload.get("metadata") or {}).get("remoteJid")
     chat_type = payload.get("chat_type") or "direct"
     should_reply = payload.get("should_reply")

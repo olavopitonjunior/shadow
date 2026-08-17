@@ -37,7 +37,7 @@ function maskPhone(phone?: string): string {
 export default function Conversations() {
   const { data: sessions, isLoading: sessionsLoading } = useQuery({
     queryKey: ["agentSessions"],
-    queryFn: api.agentSessions,
+    queryFn: api.getSessions,
     refetchInterval: 10000,
   });
 

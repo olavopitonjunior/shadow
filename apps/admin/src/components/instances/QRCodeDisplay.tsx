@@ -1,4 +1,5 @@
 import { QRCodeSVG } from "qrcode.react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { adminApi } from "@/api/client";
 import { Button } from "@/components/ui/button";
@@ -31,10 +32,34 @@ export function QRCodeDisplay({ instanceId, initialQR, onConnected }: QRCodeDisp
   const currentQR = statusData?.qr || qrData?.qr || initialQR;
   const status = statusData?.status || "connecting";
 
-  // Notify when connected
-  if (status === "connected" && statusData?.phone && onConnected) {
-    onConnected(statusData.phone);
-  }
+  // QR expiration countdown (Baileys QR expires after ~60s)
+  const QR_LIFETIME_S = 60;
+  const [qrCountdown, setQrCountdown] = useState<number | null>(null);
+
+  useEffect(() => {
+    const updatedAt = statusData?.qr_updated_at || qrData?.qr_updated_at;
+    if (!updatedAt || !currentQR) {
+      setQrCountdown(null);
+      return;
+    }
+
+    const tick = () => {
+      const elapsed = Math.floor((Date.now() - updatedAt) / 1000);
+      setQrCountdown(Math.max(0, QR_LIFETIME_S - elapsed));
+    };
+    tick();
+    const interval = setInterval(tick, 1000);
+    return () => clearInterval(interval);
+  }, [statusData?.qr_updated_at, qrData?.qr_updated_at, currentQR]);
+
+  // Notify parent when connected (useEffect prevents re-render loops)
+  const notifiedRef = useRef(false);
+  useEffect(() => {
+    if (status === "connected" && statusData?.phone && onConnected && !notifiedRef.current) {
+      notifiedRef.current = true;
+      onConnected(statusData.phone);
+    }
+  }, [status, statusData?.phone, onConnected]);
 
   if (status === "connected") {
     return null; // Parent handles connected state
@@ -86,8 +111,22 @@ export function QRCodeDisplay({ instanceId, initialQR, onConnected }: QRCodeDisp
         Abra o WhatsApp no seu celular e escaneie o QR Code
       </p>
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
-        <Loader2 className="h-3 w-3 animate-spin" />
-        Aguardando conexao...
+        {qrCountdown !== null && qrCountdown > 0 ? (
+          <>
+            <Loader2 className="h-3 w-3 animate-spin" />
+            Escaneie em {qrCountdown}s — Aguardando conexao...
+          </>
+        ) : qrCountdown === 0 ? (
+          <>
+            <RefreshCw className="h-3 w-3 animate-spin" />
+            QR expirado, gerando novo...
+          </>
+        ) : (
+          <>
+            <Loader2 className="h-3 w-3 animate-spin" />
+            Aguardando conexao...
+          </>
+        )}
       </div>
     </div>
   );

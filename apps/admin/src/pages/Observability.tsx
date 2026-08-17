@@ -58,7 +58,7 @@ export default function Observability() {
 
   // Determine database type from agent health
   const databaseType = agentHealth?.data?.components?.storage === "healthy"
-    ? (process.env.VITE_USE_SUPABASE === "true" ? "Supabase" : "SQLite (Local)")
+    ? (import.meta.env.VITE_USE_SUPABASE === "true" ? "Supabase" : "SQLite (Local)")
     : "Unknown";
 
   // Calculate metrics
@@ -84,7 +84,7 @@ export default function Observability() {
     {
       name: "Gateway (Baileys)",
       icon: Globe,
-      endpoint: process.env.VITE_GATEWAY_URL || "http://localhost:18790",
+      endpoint: import.meta.env.VITE_GATEWAY_URL || "http://localhost:18790",
       isHealthy: !gatewayHealth?.error && gatewayHealth?.data?.connections,
       latencyMs: gatewayHealth?.latencyMs,
       isLoading: gatewayLoading,
@@ -92,7 +92,7 @@ export default function Observability() {
     {
       name: "Agent API",
       icon: Activity,
-      endpoint: process.env.VITE_AGENT_API_URL || "http://localhost:8090",
+      endpoint: import.meta.env.VITE_AGENT_API_URL || "http://localhost:8090",
       isHealthy: !agentHealth?.error && agentHealth?.data?.status === "healthy",
       latencyMs: agentHealth?.latencyMs,
       isLoading: agentLoading,
@@ -100,7 +100,7 @@ export default function Observability() {
     {
       name: "Admin API",
       icon: Server,
-      endpoint: process.env.VITE_ADMIN_API_URL || "http://localhost:8099",
+      endpoint: import.meta.env.VITE_ADMIN_API_URL || "http://localhost:8099",
       isHealthy: !adminHealth?.error && adminHealth?.data?.status,
       latencyMs: adminHealth?.latencyMs,
       isLoading: adminLoading,

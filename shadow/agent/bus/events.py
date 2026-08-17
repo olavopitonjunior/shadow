@@ -34,8 +34,12 @@ class InboundMessage:
 @dataclass
 class OutboundMessage:
     """A message going out from the agent to a channel."""
-    channel: str          # "whatsapp"
+    channel: str          # "whatsapp" | "channel"
     chat_id: str          # recipient JID or "owner"
     content: str
     reply_to: str | None = None
+    target_phone: str | None = None       # E.164 phone for channel routing
+    message_type: str = "text"            # "text" | "template" | "media"
+    template_name: str | None = None      # For Meta templates
+    template_params: list[str] | None = None  # {{1}}, {{2}}, etc.
     metadata: dict[str, Any] = field(default_factory=dict)

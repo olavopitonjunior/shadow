@@ -308,5 +308,53 @@ export const gatewayApi = {
     }),
 };
 
+// ── New APIs for LangGraph Dashboard v2 ──
+
+export const agentsApi = {
+  getStatus: () => fetchJson<any>(`${API_URL}/agents/status`),
+  getActive: () => fetchJson<any>(`${API_URL}/agents/active`),
+  getHistory: (limit = 50) => fetchJson<any>(`${API_URL}/agents/history?limit=${limit}`),
+  getTrace: (sessionId: string) => fetchJson<any>(`${API_URL}/agents/${sessionId}/trace`),
+  getStreamUrl: () => `${API_URL}/agents/stream`,
+};
+
+export const crmApi = {
+  getContacts: (search?: string, limit = 50) => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (search) params.set("search", search);
+    return fetchJson<any>(`${API_URL}/crm/contacts?${params}`);
+  },
+  getContact: (phone: string) => fetchJson<any>(`${API_URL}/crm/contacts/${phone}`),
+  getTimeline: (phone: string) => fetchJson<any>(`${API_URL}/crm/contacts/${phone}/timeline`),
+  getMemories: (phone: string) => fetchJson<any>(`${API_URL}/crm/contacts/${phone}/memories`),
+  getGraph: (phone: string) => fetchJson<any>(`${API_URL}/crm/contacts/${phone}/graph`),
+  importContacts: () => fetchJson<any>(`${API_URL}/crm/contacts/import`, { method: "POST" }),
+};
+
+export const analyticsApi = {
+  getOverview: (days = 7) => fetchJson<any>(`${API_URL}/analytics/overview?days=${days}`),
+  getAgentStats: () => fetchJson<any>(`${API_URL}/analytics/agents`),
+  getToolUsage: () => fetchJson<any>(`${API_URL}/analytics/tools`),
+  getTokens: () => fetchJson<any>(`${API_URL}/analytics/tokens`),
+  getContactActivity: (limit = 10) => fetchJson<any>(`${API_URL}/analytics/contacts?limit=${limit}`),
+  getQuality: () => fetchJson<any>(`${API_URL}/analytics/quality`),
+  getTrends: (period = "7d") => fetchJson<any>(`${API_URL}/analytics/trends?period=${period}`),
+};
+
+export const documentsApi = {
+  list: (limit = 50) => fetchJson<any>(`${API_URL}/documents?limit=${limit}`),
+  get: (id: string) => fetchJson<any>(`${API_URL}/documents/${id}`),
+  getDownloadUrl: (id: string) => `${API_URL}/documents/${id}/download`,
+  listTemplates: () => fetchJson<any>(`${API_URL}/documents/templates/list`),
+  getTemplate: (category: string, name: string) => fetchJson<any>(`${API_URL}/documents/templates/${category}/${name}`),
+};
+
+export const integrationsApi = {
+  list: () => fetchJson<any>(`${API_URL}/integrations`),
+  checkHealth: (name: string) => fetchJson<any>(`${API_URL}/integrations/${name}/health`),
+  reconnect: (name: string) => fetchJson<any>(`${API_URL}/integrations/${name}/reconnect`, { method: "POST" }),
+  getLancedbStats: () => fetchJson<any>(`${API_URL}/integrations/lancedb/stats`),
+};
+
 // Re-export for convenience
 export { API_URL, AGENT_URL, GATEWAY_URL };

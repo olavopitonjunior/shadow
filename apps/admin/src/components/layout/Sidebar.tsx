@@ -1,11 +1,16 @@
 import { NavLink } from "react-router-dom";
 import {
   LayoutDashboard,
+  Bot,
+  Users,
   Server,
   MessageSquare,
+  Plug,
+  BarChart3,
   DollarSign,
   Activity,
   FileText,
+  FileOutput,
   Settings
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -18,10 +23,15 @@ interface NavItem {
 
 const navItems: NavItem[] = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard" },
-  { to: "/instances", icon: Server, label: "Instancias" },
+  { to: "/agents", icon: Bot, label: "Agent Monitor" },
+  { to: "/crm", icon: Users, label: "CRM" },
   { to: "/conversations", icon: MessageSquare, label: "Conversas" },
+  { to: "/instances", icon: Server, label: "Instancias" },
+  { to: "/integrations", icon: Plug, label: "Integracoes" },
+  { to: "/analytics", icon: BarChart3, label: "Analytics" },
   { to: "/costs", icon: DollarSign, label: "Custos API" },
   { to: "/observability", icon: Activity, label: "Observabilidade" },
+  { to: "/documents", icon: FileOutput, label: "Documentos" },
   { to: "/logs", icon: FileText, label: "Logs" },
   { to: "/settings", icon: Settings, label: "Configuracoes" },
 ];

@@ -32,3 +32,20 @@ anthropic>=0.39.0
 
 # === Multi-Provider LLM (via LiteLLM) ===
 litellm>=1.40.0
+
+# === LangGraph Multi-Agent Orchestration ===
+langgraph>=0.4.0
+langchain-core>=0.3.0
+langchain-community>=0.3.0
+langgraph-checkpoint>=2.0.0
+
+# === Document Generation ===
+jinja2>=3.1.0
+fpdf2>=2.7.0
+
+# === Analytics & Charts ===
+plotly>=5.18.0
+kaleido>=0.2.1
+
+# === Observability (optional) ===
+# langsmith>=0.1.0  # Uncomment for LangSmith tracing

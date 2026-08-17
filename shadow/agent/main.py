@@ -35,6 +35,7 @@ from security import (
 from scheduler import ShadowScheduler
 from bus import get_message_bus, OutboundMessage
 from heartbeat import HeartbeatService
+from channels import get_adapter, WebhookHandler, ChannelIncoming
 
 app = FastAPI(
     title="Shadow Agent MVP",
@@ -53,6 +54,35 @@ access_policy = get_access_policy()
 scheduler: ShadowScheduler | None = None
 heartbeat: HeartbeatService | None = None
 
+# Channel adapter (Evolution API / Meta Cloud API)
+channel_adapter = None
+webhook_handler: WebhookHandler | None = None
+
+if config.channel_enabled and config.channel_adapter != "none":
+    try:
+        adapter_kwargs = {}
+        if config.channel_adapter == "evolution":
+            adapter_kwargs = {
+                "api_url": config.evolution_api_url or "",
+                "api_key": config.evolution_api_key or "",
+                "instance": config.evolution_instance or "shadow",
+            }
+        elif config.channel_adapter == "meta_cloud":
+            adapter_kwargs = {
+                "access_token": config.meta_whatsapp_token or "",
+                "phone_number_id": config.meta_phone_number_id or "",
+                "verify_token": config.meta_verify_token or "shadow_verify",
+                "app_secret": config.meta_app_secret,
+                "waba_id": config.meta_waba_id,
+            }
+        channel_adapter = get_adapter(config.channel_adapter, **adapter_kwargs)
+        webhook_handler = WebhookHandler(adapter=channel_adapter, storage=storage)
+        print(f"[main] Channel adapter initialized: {config.channel_adapter}")
+    except Exception as e:
+        print(f"[main] Failed to initialize channel adapter: {e}")
+        channel_adapter = None
+        webhook_handler = None
+
 
 def _whatsapp_send_callback(msg: OutboundMessage) -> None:
     """Send outbound messages to the WhatsApp gateway."""
@@ -64,9 +94,43 @@ def _whatsapp_send_callback(msg: OutboundMessage) -> None:
         return
 
     try:
-        _requests.post(gateway_url, json={"text": msg.content}, timeout=10)
+        _requests.post(
+            gateway_url,
+            json={"to": msg.chat_id, "text": msg.content},
+            timeout=10,
+        )
     except Exception as e:
         print(f"[bus] Failed to send via gateway: {e}")
+
+
+def _channel_send_callback(msg: OutboundMessage) -> None:
+    """Send outbound messages via the channel adapter (Evolution/Meta Cloud)."""
+    import asyncio
+
+    if not channel_adapter:
+        print(f"[bus] No channel adapter, dropping message to {msg.chat_id}")
+        return
+
+    phone = msg.target_phone or msg.chat_id.removeprefix("channel:")
+    if not phone:
+        print("[bus] No target phone for channel message")
+        return
+
+    async def _send():
+        if msg.message_type == "template" and msg.template_name:
+            return await channel_adapter.send_template(
+                phone, msg.template_name, msg.template_params or []
+            )
+        return await channel_adapter.send_text(phone, msg.content)
+
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(_send())
+        else:
+            loop.run_until_complete(_send())
+    except Exception as e:
+        print(f"[bus] Channel send failed: {e}")
 
 
 @app.on_event("startup")
@@ -77,6 +141,9 @@ async def startup_event():
     # Start MessageBus dispatcher
     bus = get_message_bus()
     bus.subscribe_outbound("whatsapp", _whatsapp_send_callback)
+    if channel_adapter:
+        bus.subscribe_outbound("channel", _channel_send_callback)
+        print("[main] Channel bus subscriber registered")
     bus.start_dispatcher()
     print("[main] MessageBus dispatcher started")
 
@@ -232,7 +299,14 @@ def process_message(
                     "reason": "access_denied",
                 }
 
-        # Processa mensagem com sessão
+        # LangGraph orchestration (feature flag)
+        use_langgraph = os.getenv("SHADOW_USE_LANGGRAPH", "false").lower() in {"1", "true"}
+        if use_langgraph:
+            from graph import run_graph
+            result = run_graph(data, owner_id=data.get("owner_e164"))
+            return result
+
+        # Legacy: Processa mensagem com sessão
         result = handle_message(data, storage, session_store)
         return result
 
@@ -423,6 +497,126 @@ def rate_limit_info(request: Request) -> dict[str, Any]:
         "window_seconds": rate_limiter.window_seconds,
         "reset_in_seconds": rate_limiter.reset_time(client_ip),
     }
+
+
+# === Channel Webhook ===
+
+@app.get("/webhook/channel")
+def webhook_channel_verify(request: Request) -> Any:
+    """Verify webhook for Meta Cloud API (challenge response)."""
+    if not webhook_handler:
+        raise HTTPException(status_code=503, detail="Channel not configured")
+
+    challenge = webhook_handler.handle_verification(dict(request.query_params))
+    if challenge:
+        return JSONResponse(content=int(challenge) if challenge.isdigit() else challenge)
+
+    raise HTTPException(status_code=403, detail="Verification failed")
+
+
+@app.post("/webhook/channel")
+async def webhook_channel_receive(request: Request) -> dict[str, str]:
+    """Receive incoming messages from channel adapter (Evolution/Meta Cloud).
+
+    Returns 200 immediately (Meta requires response < 5s), then processes async.
+    """
+    if not webhook_handler:
+        return {"status": "channel_not_configured"}
+
+    try:
+        body = await request.json()
+    except Exception:
+        return {"status": "invalid_json"}
+
+    headers = dict(request.headers)
+    incoming = webhook_handler.parse_and_dedup(body, headers)
+
+    if incoming is None:
+        return {"status": "ignored"}
+
+    # Process in background to respond quickly
+    import asyncio
+
+    asyncio.ensure_future(_process_channel_message(incoming))
+
+    return {"status": "ok"}
+
+
+async def _process_channel_message(incoming: ChannelIncoming) -> None:
+    """Process an incoming channel message asynchronously."""
+    from channels.user_resolver import UserResolver
+    from channels.onboarding import handle_new_user
+
+    try:
+        # Resolve user (3-tier: lookup, auto-link, create)
+        resolver = UserResolver(storage)
+        resolved = resolver.resolve(
+            incoming.phone,
+            display_name=incoming.display_name,
+            channel=channel_adapter.adapter_type if channel_adapter else "evolution",
+        )
+
+        # Block processing for blocked users
+        if resolved.status == "blocked":
+            return
+
+        # Log inbound message
+        if hasattr(storage, "log_channel_message"):
+            storage.log_channel_message(
+                user_phone=incoming.phone,
+                direction="inbound",
+                channel=channel_adapter.adapter_type if channel_adapter else "evolution",
+                content=incoming.text,
+                external_id=incoming.external_id,
+            )
+
+        # Handle new user onboarding
+        if resolved.is_new and channel_adapter:
+            await handle_new_user(
+                incoming.phone, incoming.display_name, channel_adapter, storage
+            )
+            return
+
+        # Build payload compatible with handle_message()
+        scoped_storage = storage.for_owner(resolved.owner_id) if hasattr(storage, "for_owner") else storage
+
+        payload = {
+            "sender_e164": incoming.phone,
+            "owner_e164": resolved.owner_id,
+            "body": incoming.text,
+            "chat_id": f"channel:{incoming.phone}",
+            "chat_type": "direct",
+            "is_owner": True,
+            "should_reply": True,
+            "triggered": True,
+            "timestamp": incoming.timestamp,
+            "sender_name": incoming.display_name,
+        }
+
+        result = handle_message(payload, scoped_storage, session_store)
+
+        # Send reply via channel adapter
+        reply = result.get("reply")
+        if reply and channel_adapter:
+            send_result = await channel_adapter.send_text(incoming.phone, reply)
+            if not send_result.success:
+                print(f"[channel] Failed to send reply to {incoming.phone}: {send_result.error}")
+
+            # Log outbound message
+            if hasattr(storage, "log_channel_message"):
+                storage.log_channel_message(
+                    user_phone=incoming.phone,
+                    direction="outbound",
+                    channel=channel_adapter.adapter_type,
+                    content=reply,
+                )
+
+        # Mark as read
+        if channel_adapter and incoming.external_id:
+            await channel_adapter.mark_read(incoming.external_id)
+
+    except Exception as e:
+        print(f"[channel] Error processing message from {incoming.phone}: {e}")
 
 
 # === Error Handlers ===

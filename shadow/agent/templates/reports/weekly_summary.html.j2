@@ -1,0 +1,52 @@
+<html>
+<head><meta charset="utf-8"><title>Relatorio Semanal</title></head>
+<body style="font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 40px;">
+
+<h1>Relatorio Semanal</h1>
+<p>Periodo: {{ period_start }} a {{ period_end }}</p>
+
+<hr>
+
+<h2>Resumo</h2>
+<table style="width: 100%; border-collapse: collapse;">
+  <tr>
+    <td style="padding: 8px; border: 1px solid #ddd;"><strong>Tarefas criadas</strong></td>
+    <td style="padding: 8px; border: 1px solid #ddd;">{{ tasks_created }}</td>
+  </tr>
+  <tr>
+    <td style="padding: 8px; border: 1px solid #ddd;"><strong>Tarefas concluidas</strong></td>
+    <td style="padding: 8px; border: 1px solid #ddd;">{{ tasks_completed }}</td>
+  </tr>
+  <tr>
+    <td style="padding: 8px; border: 1px solid #ddd;"><strong>Compromissos</strong></td>
+    <td style="padding: 8px; border: 1px solid #ddd;">{{ appointments_count }}</td>
+  </tr>
+  <tr>
+    <td style="padding: 8px; border: 1px solid #ddd;"><strong>Contatos ativos</strong></td>
+    <td style="padding: 8px; border: 1px solid #ddd;">{{ active_contacts }}</td>
+  </tr>
+</table>
+
+{% if highlights %}
+<h2>Destaques</h2>
+<ul>
+{% for item in highlights %}
+  <li>{{ item }}</li>
+{% endfor %}
+</ul>
+{% endif %}
+
+{% if pending_items %}
+<h2>Pendencias</h2>
+<ul>
+{% for item in pending_items %}
+  <li>{{ item }}</li>
+{% endfor %}
+</ul>
+{% endif %}
+
+<hr>
+<p style="color: #999; font-size: 0.9em;">Gerado automaticamente por Shadow.</p>
+
+</body>
+</html>

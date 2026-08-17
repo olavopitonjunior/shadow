@@ -35,6 +35,11 @@ services:
       - SUPABASE_KEY=${SUPABASE_KEY}
       - SHADOW_USE_SUPABASE=${SHADOW_USE_SUPABASE:-false}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - SHADOW_CHANNEL_ENABLED=${SHADOW_CHANNEL_ENABLED:-false}
+      - SHADOW_CHANNEL_ADAPTER=${SHADOW_CHANNEL_ADAPTER:-none}
+      - EVOLUTION_API_URL=http://evolution:8080
+      - EVOLUTION_API_KEY=${EVOLUTION_API_KEY:-shadow-evo-key}
+      - EVOLUTION_INSTANCE=${EVOLUTION_INSTANCE:-shadow}
     ports:
       - "8090:8090"
     volumes:
@@ -42,6 +47,24 @@ services:
     restart: unless-stopped
     networks:
       - shadow-network
+
+  evolution:
+    image: atendai/evolution-api
+    container_name: shadow-evolution
+    environment:
+      - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY:-shadow-evo-key}
+      - WEBHOOK_GLOBAL_URL=http://agent:8090/webhook/channel
+      - WEBHOOK_GLOBAL_ENABLED=true
+      - WEBHOOK_GLOBAL_WEBHOOK_BY_EVENTS=false
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data/evolution:/evolution/store
+    restart: unless-stopped
+    networks:
+      - shadow-network
+    profiles:
+      - channel
 
 networks:
   shadow-network:
